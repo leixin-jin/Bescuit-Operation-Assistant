@@ -13,8 +13,10 @@ import { Route as CalendarRouteImport } from './routes/calendar'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SalesNewRouteImport } from './routes/sales/new'
 import { Route as InvoicesReviewRouteImport } from './routes/invoices/review'
+import { Route as InvoicesNewRouteImport } from './routes/invoices/new'
 import { Route as AnalyticsMonthlyRouteImport } from './routes/analytics/monthly'
 import { Route as AnalyticsCalendarRouteImport } from './routes/analytics/calendar'
+import { Route as InvoicesReviewJobIdRouteImport } from './routes/invoices/review/$jobId'
 
 const CalendarRoute = CalendarRouteImport.update({
   id: '/calendar',
@@ -36,6 +38,11 @@ const InvoicesReviewRoute = InvoicesReviewRouteImport.update({
   path: '/invoices/review',
   getParentRoute: () => rootRouteImport,
 } as any)
+const InvoicesNewRoute = InvoicesNewRouteImport.update({
+  id: '/invoices/new',
+  path: '/invoices/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AnalyticsMonthlyRoute = AnalyticsMonthlyRouteImport.update({
   id: '/analytics/monthly',
   path: '/analytics/monthly',
@@ -46,22 +53,31 @@ const AnalyticsCalendarRoute = AnalyticsCalendarRouteImport.update({
   path: '/analytics/calendar',
   getParentRoute: () => rootRouteImport,
 } as any)
+const InvoicesReviewJobIdRoute = InvoicesReviewJobIdRouteImport.update({
+  id: '/$jobId',
+  path: '/$jobId',
+  getParentRoute: () => InvoicesReviewRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/calendar': typeof CalendarRoute
   '/analytics/calendar': typeof AnalyticsCalendarRoute
   '/analytics/monthly': typeof AnalyticsMonthlyRoute
-  '/invoices/review': typeof InvoicesReviewRoute
+  '/invoices/new': typeof InvoicesNewRoute
+  '/invoices/review': typeof InvoicesReviewRouteWithChildren
   '/sales/new': typeof SalesNewRoute
+  '/invoices/review/$jobId': typeof InvoicesReviewJobIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/calendar': typeof CalendarRoute
   '/analytics/calendar': typeof AnalyticsCalendarRoute
   '/analytics/monthly': typeof AnalyticsMonthlyRoute
-  '/invoices/review': typeof InvoicesReviewRoute
+  '/invoices/new': typeof InvoicesNewRoute
+  '/invoices/review': typeof InvoicesReviewRouteWithChildren
   '/sales/new': typeof SalesNewRoute
+  '/invoices/review/$jobId': typeof InvoicesReviewJobIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -69,8 +85,10 @@ export interface FileRoutesById {
   '/calendar': typeof CalendarRoute
   '/analytics/calendar': typeof AnalyticsCalendarRoute
   '/analytics/monthly': typeof AnalyticsMonthlyRoute
-  '/invoices/review': typeof InvoicesReviewRoute
+  '/invoices/new': typeof InvoicesNewRoute
+  '/invoices/review': typeof InvoicesReviewRouteWithChildren
   '/sales/new': typeof SalesNewRoute
+  '/invoices/review/$jobId': typeof InvoicesReviewJobIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -79,24 +97,30 @@ export interface FileRouteTypes {
     | '/calendar'
     | '/analytics/calendar'
     | '/analytics/monthly'
+    | '/invoices/new'
     | '/invoices/review'
     | '/sales/new'
+    | '/invoices/review/$jobId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/calendar'
     | '/analytics/calendar'
     | '/analytics/monthly'
+    | '/invoices/new'
     | '/invoices/review'
     | '/sales/new'
+    | '/invoices/review/$jobId'
   id:
     | '__root__'
     | '/'
     | '/calendar'
     | '/analytics/calendar'
     | '/analytics/monthly'
+    | '/invoices/new'
     | '/invoices/review'
     | '/sales/new'
+    | '/invoices/review/$jobId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -104,7 +128,8 @@ export interface RootRouteChildren {
   CalendarRoute: typeof CalendarRoute
   AnalyticsCalendarRoute: typeof AnalyticsCalendarRoute
   AnalyticsMonthlyRoute: typeof AnalyticsMonthlyRoute
-  InvoicesReviewRoute: typeof InvoicesReviewRoute
+  InvoicesNewRoute: typeof InvoicesNewRoute
+  InvoicesReviewRoute: typeof InvoicesReviewRouteWithChildren
   SalesNewRoute: typeof SalesNewRoute
 }
 
@@ -138,6 +163,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof InvoicesReviewRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/invoices/new': {
+      id: '/invoices/new'
+      path: '/invoices/new'
+      fullPath: '/invoices/new'
+      preLoaderRoute: typeof InvoicesNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/analytics/monthly': {
       id: '/analytics/monthly'
       path: '/analytics/monthly'
@@ -152,15 +184,35 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AnalyticsCalendarRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/invoices/review/$jobId': {
+      id: '/invoices/review/$jobId'
+      path: '/$jobId'
+      fullPath: '/invoices/review/$jobId'
+      preLoaderRoute: typeof InvoicesReviewJobIdRouteImport
+      parentRoute: typeof InvoicesReviewRoute
+    }
   }
 }
+
+interface InvoicesReviewRouteChildren {
+  InvoicesReviewJobIdRoute: typeof InvoicesReviewJobIdRoute
+}
+
+const InvoicesReviewRouteChildren: InvoicesReviewRouteChildren = {
+  InvoicesReviewJobIdRoute: InvoicesReviewJobIdRoute,
+}
+
+const InvoicesReviewRouteWithChildren = InvoicesReviewRoute._addFileChildren(
+  InvoicesReviewRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   CalendarRoute: CalendarRoute,
   AnalyticsCalendarRoute: AnalyticsCalendarRoute,
   AnalyticsMonthlyRoute: AnalyticsMonthlyRoute,
-  InvoicesReviewRoute: InvoicesReviewRoute,
+  InvoicesNewRoute: InvoicesNewRoute,
+  InvoicesReviewRoute: InvoicesReviewRouteWithChildren,
   SalesNewRoute: SalesNewRoute,
 }
 export const routeTree = rootRouteImport

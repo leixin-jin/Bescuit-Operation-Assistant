@@ -71,7 +71,7 @@ function HomePage() {
               </Card>
             </Link>
 
-            <Link to="/invoices/review" className="group">
+            <Link to="/invoices/new" className="group">
               <Card className="h-full cursor-pointer rounded-xl border-2 border-transparent transition-all hover:border-primary/20 hover:shadow-lg">
                 <CardHeader className="pb-4">
                   <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-blue-100">
@@ -79,13 +79,13 @@ function HomePage() {
                   </div>
                   <CardTitle className="text-xl">输入一张发票</CardTitle>
                   <CardDescription className="text-base">
-                    Phase 4 会接入拍照上传、识别与核对工作台
+                    拍照或上传发票，并进入独立的核对工作台
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
                   <Button className="w-full rounded-lg">
                     <Camera className="mr-2 h-4 w-4" />
-                    查看工作台占位页
+                    开始 intake
                   </Button>
                 </CardContent>
               </Card>
