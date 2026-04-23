@@ -29,7 +29,7 @@ async function renderRoute(initialPath = '/') {
   return { router }
 }
 
-describe('phase 1-3 smoke tests', () => {
+describe('phase 1-4 smoke tests', () => {
   test('home page exposes the key phase entry points', async () => {
     await renderRoute('/')
 
@@ -48,6 +48,16 @@ describe('phase 1-3 smoke tests', () => {
     })
 
     expect(await screen.findByRole('heading', { name: '日历概览' })).toBeTruthy()
+  })
+
+  test('legacy /invoices/review redirects to /invoices/new', async () => {
+    const { router } = await renderRoute('/invoices/review')
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/invoices/new')
+    })
+
+    expect(await screen.findByRole('heading', { name: '发票 intake' })).toBeTruthy()
   })
 
   test('sales entry page recomputes the total when channel amounts change', async () => {
@@ -70,6 +80,15 @@ describe('phase 1-3 smoke tests', () => {
     expect(screen.getByText('本月总收入')).toBeTruthy()
     expect(screen.getByText('本月总支出')).toBeTruthy()
     expect(screen.getByText('本月净利润')).toBeTruthy()
+  })
+
+  test('invoice review workbench renders the split preview and review sections', async () => {
+    await renderRoute('/invoices/review/demo-metro-apr')
+
+    expect(await screen.findByRole('heading', { name: '发票 review 工作台' })).toBeTruthy()
+    expect(screen.getByText('文档预览')).toBeTruthy()
+    expect(screen.getByText('发票信息')).toBeTruthy()
+    expect(screen.getByText('行项目')).toBeTruthy()
   })
 
   test('sidebar marks the current route as active', async () => {

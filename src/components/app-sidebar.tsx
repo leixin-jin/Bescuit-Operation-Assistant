@@ -24,7 +24,7 @@ import {
 const navItems = [
   { title: "首页", href: "/", icon: Home },
   { title: "营业额录入", href: "/sales/new", icon: TrendingUp },
-  { title: "发票核对", href: "/invoices/review", icon: Receipt },
+  { title: "发票核对", href: "/invoices/new", icon: Receipt },
   { title: "数据分析", href: "/analytics/monthly", icon: TrendingUp },
   { title: "日历概览", href: "/analytics/calendar", icon: Calendar },
 ]
@@ -34,8 +34,13 @@ export function AppSidebar() {
     select: (state) => state.location.pathname,
   })
 
-  const isActiveRoute = (href: string) =>
-    pathname === href || pathname.startsWith(`${href}/`)
+  const isActiveRoute = (href: string) => {
+    if (href === "/invoices/new") {
+      return pathname === href || pathname.startsWith("/invoices/review/")
+    }
+
+    return pathname === href || pathname.startsWith(`${href}/`)
+  }
 
   return (
     <Sidebar>
