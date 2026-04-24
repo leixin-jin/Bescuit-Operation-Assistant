@@ -13,7 +13,8 @@ import { Button } from '@/components/ui/button'
 import { DocumentPreview } from '@/features/invoices/document-preview'
 import {
   formatInvoiceTimestamp,
-  getOrCreateInvoiceJob,
+  getInvoiceJob,
+  getInvoiceReadinessSummary,
   getStatusLabel,
   ingredientOptions,
   saveInvoiceJob,
@@ -29,25 +30,45 @@ export const Route = createFileRoute('/invoices/review/$jobId')({
 
 function InvoiceReviewWorkbenchPage() {
   const { jobId } = Route.useParams()
-  const [job, setJob] = useState<InvoiceReviewJob>(() => getOrCreateInvoiceJob(jobId))
+  const [job, setJob] = useState<InvoiceReviewJob | null>(null)
+  const [isLoadingJob, setIsLoadingJob] = useState(true)
   const [zoom, setZoom] = useState(100)
   const [rotation, setRotation] = useState(0)
   const [currentPage, setCurrentPage] = useState(1)
 
   useEffect(() => {
-    setJob(getOrCreateInvoiceJob(jobId))
+    setIsLoadingJob(true)
+    setJob(null)
     setZoom(100)
     setRotation(0)
     setCurrentPage(1)
+
+    setJob(getInvoiceJob(jobId) ?? null)
+    setIsLoadingJob(false)
   }, [jobId])
 
-  const unmatchedCount = job.lineItems.filter((item) => !item.matched).length
+  const readinessSummary = job
+    ? getInvoiceReadinessSummary(job)
+    : {
+        isReady: false,
+        missingHeaderFields: [],
+        invalidHeaderFields: [],
+        unmatchedLineItems: 0,
+      }
+  const blockingIssueCount =
+    readinessSummary.missingHeaderFields.length +
+    readinessSummary.invalidHeaderFields.length +
+    (readinessSummary.unmatchedLineItems > 0 ? 1 : 0)
 
   const updateJob = (updater: (currentJob: InvoiceReviewJob) => InvoiceReviewJob) => {
     setJob((currentJob) => {
+      if (!currentJob) {
+        return currentJob
+      }
+
       const nextJob = updater(currentJob)
       saveInvoiceJob(nextJob)
-      return getOrCreateInvoiceJob(nextJob.jobId)
+      return getInvoiceJob(nextJob.jobId) ?? nextJob
     })
   }
 
@@ -82,6 +103,36 @@ function InvoiceReviewWorkbenchPage() {
     }))
   }
 
+  if (isLoadingJob) {
+    return (
+      <AppShell>
+        <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center px-6">
+          <div className="rounded-xl border bg-background px-6 py-5 text-sm text-muted-foreground">
+            正在加载发票任务…
+          </div>
+        </div>
+      </AppShell>
+    )
+  }
+
+  if (!job) {
+    return (
+      <AppShell>
+        <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center px-6">
+          <div className="max-w-md rounded-2xl border bg-background p-6 shadow-sm">
+            <p className="text-lg font-semibold">未找到发票任务</p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              该任务不存在，或者不在当前浏览器会话中。
+            </p>
+            <Button className="mt-4 rounded-lg" asChild>
+              <Link to="/invoices/new">返回 intake</Link>
+            </Button>
+          </div>
+        </div>
+      </AppShell>
+    )
+  }
+
   return (
     <AppShell>
       <div className="flex h-[calc(100vh-3.5rem)] flex-col lg:h-screen">
@@ -109,15 +160,15 @@ function InvoiceReviewWorkbenchPage() {
               </p>
             </div>
 
-            {unmatchedCount > 0 ? (
-              <Badge variant="secondary" className="gap-1.5 rounded-lg bg-amber-100 text-amber-700">
-                <AlertCircle className="h-3.5 w-3.5" />
-                {unmatchedCount} 项未匹配
-              </Badge>
-            ) : (
+            {readinessSummary.isReady ? (
               <Badge variant="secondary" className="gap-1.5 rounded-lg bg-emerald-100 text-emerald-700">
                 <CheckCircle className="h-3.5 w-3.5" />
-                已完成全部映射
+                已满足入账条件
+              </Badge>
+            ) : (
+              <Badge variant="secondary" className="gap-1.5 rounded-lg bg-amber-100 text-amber-700">
+                <AlertCircle className="h-3.5 w-3.5" />
+                {blockingIssueCount} 个入账阻塞项
               </Badge>
             )}
           </div>
@@ -171,6 +222,26 @@ function InvoiceReviewWorkbenchPage() {
             </div>
 
             <div className="shrink-0 border-t bg-background px-6 py-4">
+              {readinessSummary.isReady ? null : (
+                <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">
+                  <p className="font-medium text-amber-800">入账前还需要补齐以下信息</p>
+                  {readinessSummary.missingHeaderFields.length > 0 ? (
+                    <p className="mt-2">
+                      缺少必填字段：{readinessSummary.missingHeaderFields.join('、')}
+                    </p>
+                  ) : null}
+                  {readinessSummary.invalidHeaderFields.length > 0 ? (
+                    <p className="mt-2">
+                      金额格式不正确：{readinessSummary.invalidHeaderFields.join('、')}
+                    </p>
+                  ) : null}
+                  {readinessSummary.unmatchedLineItems > 0 ? (
+                    <p className="mt-2">
+                      还有 {readinessSummary.unmatchedLineItems} 项商品未映射到原料库。
+                    </p>
+                  ) : null}
+                </div>
+              )}
               <div className="flex gap-3">
                 <Button
                   variant="secondary"
@@ -180,7 +251,7 @@ function InvoiceReviewWorkbenchPage() {
                   <Save className="mr-2 h-4 w-4" />
                   保存草稿
                 </Button>
-                <Button className="flex-1 rounded-lg" disabled={unmatchedCount > 0}>
+                <Button className="flex-1 rounded-lg" disabled={!readinessSummary.isReady}>
                   <CheckCircle className="mr-2 h-4 w-4" />
                   确认入账
                 </Button>

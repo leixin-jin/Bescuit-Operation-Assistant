@@ -34,6 +34,13 @@ export interface InvoiceReviewJob {
   lineItems: InvoiceLineItemDraft[]
 }
 
+export interface InvoiceReadinessSummary {
+  isReady: boolean
+  missingHeaderFields: string[]
+  invalidHeaderFields: string[]
+  unmatchedLineItems: number
+}
+
 export const ingredientOptions: IngredientOption[] = [
   { value: 'heineken-330', label: 'Heineken 啤酒 330ml' },
   { value: 'absolut-750', label: 'Absolut Vodka 750ml' },
@@ -42,6 +49,16 @@ export const ingredientOptions: IngredientOption[] = [
   { value: 'mint', label: '薄荷叶' },
   { value: 'lime', label: '青柠' },
 ]
+
+const SESSION_STORAGE_KEY = 'bescuit-operation-assistant:invoice-jobs'
+
+const requiredInvoiceHeaderFieldLabels = {
+  supplier: '供应商',
+  invoiceNo: '发票号',
+  date: '发票日期',
+  totalAmount: '总金额',
+  taxAmount: '税额',
+} satisfies Record<RequiredInvoiceHeaderField, string>
 
 const seedJobs: InvoiceReviewJob[] = [
   {
@@ -134,39 +151,26 @@ const seedJobs: InvoiceReviewJob[] = [
   },
 ]
 
-const jobStore = new Map(seedJobs.map((job) => [job.jobId, cloneJob(job)]))
-
 export function listInvoiceJobs() {
-  return Array.from(jobStore.values())
+  return Array.from(getJobSnapshot().values())
     .sort((left, right) => right.uploadedAt.localeCompare(left.uploadedAt))
     .map(cloneJob)
 }
 
 export function getInvoiceJob(jobId: string) {
-  const job = jobStore.get(jobId)
+  const job = getJobSnapshot().get(jobId)
   return job ? cloneJob(job) : undefined
-}
-
-export function getOrCreateInvoiceJob(jobId: string) {
-  const existing = getInvoiceJob(jobId)
-  if (existing) {
-    return existing
-  }
-
-  const fallbackJob = createBaseJob(jobId, `invoice-${jobId}.jpg`)
-  jobStore.set(jobId, cloneJob(fallbackJob))
-  return fallbackJob
 }
 
 export function createInvoiceJob(fileName: string) {
   const jobId = `job-${Date.now().toString(36)}`
   const createdJob = createBaseJob(jobId, fileName)
-  jobStore.set(jobId, cloneJob(createdJob))
+  upsertStoredJob(createdJob)
   return createdJob
 }
 
 export function saveInvoiceJob(job: InvoiceReviewJob) {
-  jobStore.set(job.jobId, cloneJob(normalizeJob(job)))
+  upsertStoredJob(job)
 }
 
 export function getStatusLabel(status: InvoiceJobStatus) {
@@ -190,6 +194,24 @@ export function formatInvoiceTimestamp(isoTimestamp: string) {
     minute: '2-digit',
     hour12: false,
   }).format(new Date(isoTimestamp))
+}
+
+export function getInvoiceReadinessSummary(
+  job: Pick<InvoiceReviewJob, 'header' | 'lineItems'>,
+): InvoiceReadinessSummary {
+  const missingHeaderFields = getMissingRequiredHeaderFields(job.header)
+  const invalidHeaderFields = getInvalidHeaderFields(job.header)
+  const unmatchedLineItems = job.lineItems.filter((item) => !item.matched).length
+
+  return {
+    isReady:
+      missingHeaderFields.length === 0 &&
+      invalidHeaderFields.length === 0 &&
+      unmatchedLineItems === 0,
+    missingHeaderFields,
+    invalidHeaderFields,
+    unmatchedLineItems,
+  }
 }
 
 function createBaseJob(jobId: string, fileName: string): InvoiceReviewJob {
@@ -233,14 +255,17 @@ function createBaseJob(jobId: string, fileName: string): InvoiceReviewJob {
 function normalizeJob(job: InvoiceReviewJob): InvoiceReviewJob {
   const lineItems = job.lineItems.map((item) => ({
     ...item,
-    matched: Boolean(item.ingredient),
+    matched: Boolean(item.ingredient.trim()),
   }))
 
-  const nextStatus = lineItems.every((item) => item.matched) ? 'ready' : 'needs_review'
+  const readinessSummary = getInvoiceReadinessSummary({
+    header: job.header,
+    lineItems,
+  })
 
   return {
     ...job,
-    status: nextStatus,
+    status: readinessSummary.isReady ? 'ready' : 'needs_review',
     lineItems,
   }
 }
@@ -253,8 +278,162 @@ function cloneJob(job: InvoiceReviewJob): InvoiceReviewJob {
   }
 }
 
+function getJobSnapshot() {
+  const jobMap = new Map(seedJobs.map((job) => [job.jobId, cloneJob(job)]))
+
+  for (const storedJob of readStoredJobs()) {
+    jobMap.set(storedJob.jobId, cloneJob(normalizeJob(storedJob)))
+  }
+
+  return jobMap
+}
+
+function upsertStoredJob(job: InvoiceReviewJob) {
+  if (!canUseSessionStorage()) {
+    return
+  }
+
+  const normalizedJob = cloneJob(normalizeJob(job))
+  const storedJobs = readStoredJobs().filter(
+    (storedJob) => storedJob.jobId !== normalizedJob.jobId,
+  )
+
+  storedJobs.push(normalizedJob)
+  persistStoredJobs(storedJobs)
+}
+
+function readStoredJobs() {
+  if (!canUseSessionStorage()) {
+    return []
+  }
+
+  const serializedJobs = window.sessionStorage.getItem(SESSION_STORAGE_KEY)
+  if (!serializedJobs) {
+    return []
+  }
+
+  try {
+    const parsedJobs = JSON.parse(serializedJobs)
+    if (!Array.isArray(parsedJobs)) {
+      return []
+    }
+
+    return parsedJobs.filter(isInvoiceReviewJob).map(cloneJob)
+  } catch {
+    window.sessionStorage.removeItem(SESSION_STORAGE_KEY)
+    return []
+  }
+}
+
+function persistStoredJobs(jobs: InvoiceReviewJob[]) {
+  if (!canUseSessionStorage()) {
+    return
+  }
+
+  window.sessionStorage.setItem(
+    SESSION_STORAGE_KEY,
+    JSON.stringify(jobs.map(cloneJob)),
+  )
+}
+
+function canUseSessionStorage() {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.sessionStorage !== 'undefined'
+  )
+}
+
+function isInvoiceReviewJob(value: unknown): value is InvoiceReviewJob {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    typeof value.jobId === 'string' &&
+    typeof value.fileName === 'string' &&
+    typeof value.uploadedAt === 'string' &&
+    typeof value.pageCount === 'number' &&
+    isInvoiceJobStatus(value.status) &&
+    isInvoiceHeaderDraft(value.header) &&
+    Array.isArray(value.lineItems) &&
+    value.lineItems.every(isInvoiceLineItemDraft)
+  )
+}
+
+function isInvoiceJobStatus(value: unknown): value is InvoiceJobStatus {
+  return value === 'uploaded' || value === 'needs_review' || value === 'ready'
+}
+
+function isInvoiceHeaderDraft(value: unknown): value is InvoiceHeaderDraft {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    typeof value.supplier === 'string' &&
+    typeof value.invoiceNo === 'string' &&
+    typeof value.date === 'string' &&
+    typeof value.totalAmount === 'string' &&
+    typeof value.taxAmount === 'string' &&
+    typeof value.notes === 'string'
+  )
+}
+
+function isInvoiceLineItemDraft(value: unknown): value is InvoiceLineItemDraft {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.qty === 'string' &&
+    typeof value.unit === 'string' &&
+    typeof value.unitPrice === 'string' &&
+    typeof value.ingredient === 'string' &&
+    typeof value.matched === 'boolean'
+  )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function getMissingRequiredHeaderFields(header: InvoiceHeaderDraft) {
+  return typedEntries(requiredInvoiceHeaderFieldLabels)
+    .filter(([field]) => header[field].trim() === '')
+    .map(([, label]) => label)
+}
+
+function getInvalidHeaderFields(header: InvoiceHeaderDraft) {
+  const invalidFields: string[] = []
+
+  if (header.totalAmount.trim() !== '' && !isInvoiceAmount(header.totalAmount)) {
+    invalidFields.push('总金额')
+  }
+
+  if (header.taxAmount.trim() !== '' && !isInvoiceAmount(header.taxAmount)) {
+    invalidFields.push('税额')
+  }
+
+  return invalidFields
+}
+
+function isInvoiceAmount(value: string) {
+  const normalizedValue = value.trim().replace(',', '.')
+  return /^\d+(?:\.\d{1,2})?$/.test(normalizedValue)
+}
+
+function typedEntries<T extends Record<string, string>>(record: T) {
+  return Object.entries(record) as Array<
+    [keyof T & string, T[keyof T & string]]
+  >
+}
+
 function getMadridTodayInputValue() {
   return new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'Europe/Madrid',
   }).format(new Date())
 }
+
+type RequiredInvoiceHeaderField = Exclude<keyof InvoiceHeaderDraft, 'notes'>

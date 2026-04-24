@@ -1,11 +1,8 @@
 import handler from '@tanstack/react-start/server-entry'
 
+import { retryUnhandledQueueBatch } from '@/lib/queue-consumer-fallback'
+
 export default {
   fetch: handler.fetch,
-  async queue(batch) {
-    for (const message of batch.messages) {
-      console.warn('Unhandled queue message during Phase 1 scaffold:', message.body)
-      message.ack()
-    }
-  },
+  queue: retryUnhandledQueueBatch,
 }

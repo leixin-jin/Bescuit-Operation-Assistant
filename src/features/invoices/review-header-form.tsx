@@ -56,6 +56,7 @@ export function ReviewHeaderForm({
             <Input
               id="totalAmount"
               value={header.totalAmount}
+              inputMode="decimal"
               onChange={(event) => onFieldChange('totalAmount', event.target.value)}
               className="rounded-lg"
             />
@@ -65,6 +66,7 @@ export function ReviewHeaderForm({
             <Input
               id="taxAmount"
               value={header.taxAmount}
+              inputMode="decimal"
               onChange={(event) => onFieldChange('taxAmount', event.target.value)}
               className="rounded-lg"
             />

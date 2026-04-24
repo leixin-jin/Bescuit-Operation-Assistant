@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState, type ChangeEvent } from 'react'
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
 import { ArrowLeft, Camera, FileImage, Upload } from 'lucide-react'
 
@@ -15,10 +15,17 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
+  formatInvoiceUploadLimit,
+  INVOICE_UPLOAD_ACCEPT,
+  MAX_INVOICE_UPLOAD_SIZE_BYTES,
+  validateInvoiceUpload,
+} from '@/features/invoices/intake-file-validation'
+import {
   createInvoiceJob,
   formatInvoiceTimestamp,
   getStatusLabel,
   listInvoiceJobs,
+  type InvoiceReviewJob,
 } from '@/features/invoices/mock-store'
 
 export const Route = createFileRoute('/invoices/new')({
@@ -28,14 +35,28 @@ export const Route = createFileRoute('/invoices/new')({
 function InvoiceIntakePage() {
   const navigate = useNavigate()
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [recentJobs, setRecentJobs] = useState(() => listInvoiceJobs())
+  const [fileErrorMessage, setFileErrorMessage] = useState<string | null>(null)
+  const [recentJobs, setRecentJobs] = useState<InvoiceReviewJob[]>([])
+  const [hasLoadedJobs, setHasLoadedJobs] = useState(false)
+
+  useEffect(() => {
+    setRecentJobs(listInvoiceJobs())
+    setHasLoadedJobs(true)
+  }, [])
 
   const handleCreateJob = () => {
     if (!selectedFile) {
       return
     }
 
+    const validationResult = validateInvoiceUpload(selectedFile)
+    if (!validationResult.isValid) {
+      setFileErrorMessage(validationResult.errorMessage ?? '文件校验失败。')
+      return
+    }
+
     const nextJob = createInvoiceJob(selectedFile.name)
+    setFileErrorMessage(null)
     setRecentJobs(listInvoiceJobs())
     setSelectedFile(null)
 
@@ -43,6 +64,27 @@ function InvoiceIntakePage() {
       to: '/invoices/review/$jobId',
       params: { jobId: nextJob.jobId },
     })
+  }
+
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null
+
+    if (!file) {
+      setSelectedFile(null)
+      setFileErrorMessage(null)
+      return
+    }
+
+    const validationResult = validateInvoiceUpload(file)
+    if (!validationResult.isValid) {
+      setSelectedFile(null)
+      setFileErrorMessage(validationResult.errorMessage ?? '文件校验失败。')
+      event.target.value = ''
+      return
+    }
+
+    setSelectedFile(file)
+    setFileErrorMessage(null)
   }
 
   return (
@@ -89,17 +131,22 @@ function InvoiceIntakePage() {
                     选择发票文件
                   </Label>
                   <p className="mt-2 text-sm text-muted-foreground">
-                    支持图片或 PDF，当前仅模拟创建 intake job。
+                    支持 PDF 或常见图片格式，单文件不超过{' '}
+                    {formatInvoiceUploadLimit(MAX_INVOICE_UPLOAD_SIZE_BYTES)}，当前仅模拟创建
+                    intake job。
                   </p>
                   <Input
                     id="invoice-file"
                     type="file"
-                    accept="image/*,.pdf"
+                    accept={INVOICE_UPLOAD_ACCEPT}
                     className="mt-4 max-w-md rounded-lg"
-                    onChange={(event) =>
-                      setSelectedFile(event.target.files?.[0] ?? null)
-                    }
+                    onChange={handleFileChange}
                   />
+                  {fileErrorMessage ? (
+                    <p className="mt-3 text-sm text-destructive">
+                      {fileErrorMessage}
+                    </p>
+                  ) : null}
                 </div>
               </div>
 
@@ -114,7 +161,7 @@ function InvoiceIntakePage() {
                     </p>
                   </div>
                   <Badge variant={selectedFile ? 'default' : 'secondary'} className="rounded-lg">
-                    {selectedFile ? '可创建' : '待选择'}
+                    {selectedFile ? '可创建' : fileErrorMessage ? '校验失败' : '待选择'}
                   </Badge>
                 </div>
               </div>
@@ -149,28 +196,34 @@ function InvoiceIntakePage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {recentJobs.map((job) => (
-                <Link
-                  key={job.jobId}
-                  to="/invoices/review/$jobId"
-                  params={{ jobId: job.jobId }}
-                  className="block rounded-xl border bg-background p-4 transition-colors hover:border-primary/40 hover:bg-accent/30"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate font-medium">{job.fileName}</p>
-                      <p className="mt-1 text-sm text-muted-foreground">
-                        {job.header.supplier || '待补充供应商'} ·
-                        {' '}
-                        {formatInvoiceTimestamp(job.uploadedAt)}
-                      </p>
+              {hasLoadedJobs ? (
+                recentJobs.map((job) => (
+                  <Link
+                    key={job.jobId}
+                    to="/invoices/review/$jobId"
+                    params={{ jobId: job.jobId }}
+                    className="block rounded-xl border bg-background p-4 transition-colors hover:border-primary/40 hover:bg-accent/30"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{job.fileName}</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          {job.header.supplier || '待补充供应商'} ·
+                          {' '}
+                          {formatInvoiceTimestamp(job.uploadedAt)}
+                        </p>
+                      </div>
+                      <Badge variant="secondary" className="shrink-0 rounded-lg">
+                        {getStatusLabel(job.status)}
+                      </Badge>
                     </div>
-                    <Badge variant="secondary" className="shrink-0 rounded-lg">
-                      {getStatusLabel(job.status)}
-                    </Badge>
-                  </div>
-                </Link>
-              ))}
+                  </Link>
+                ))
+              ) : (
+                <div className="rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">
+                  正在读取当前浏览器会话中的任务列表…
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>
