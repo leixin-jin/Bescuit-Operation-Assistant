@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { ArrowLeft, CalendarIcon, CheckCircle, Euro, Save } from 'lucide-react'
 
@@ -8,25 +8,22 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-
-const paymentChannels = [
-  { id: 'bbva', name: 'BBVA', color: 'bg-blue-500' },
-  { id: 'caixa', name: 'CAIXA', color: 'bg-red-500' },
-  { id: 'efectivo', name: 'EFECTIVO', color: 'bg-emerald-500' },
-]
+import type { SalesDailyRecord } from '@/lib/server/app-domain'
+import { getSalesEntryPageData, getSalesRecord } from '@/lib/server/queries/sales'
+import { saveSalesDraft, submitSalesEntry } from '@/lib/server/mutations/sales'
 
 export const Route = createFileRoute('/sales/new')({
+  loader: () => getSalesEntryPageData(),
   component: SalesEntryPage,
 })
 
 function SalesEntryPage() {
-  const [amounts, setAmounts] = useState<Record<string, string>>({
-    bbva: '',
-    caixa: '',
-    efectivo: '',
-  })
-  const [date, setDate] = useState(getTodayInputValue)
-  const [notes, setNotes] = useState('')
+  const loaderData = Route.useLoaderData()
+  const [amounts, setAmounts] = useState(() => createAmountInputs(loaderData.existingRecord))
+  const [date, setDate] = useState(loaderData.date)
+  const [notes, setNotes] = useState(loaderData.existingRecord?.note ?? '')
+  const [isPersisting, setIsPersisting] = useState(false)
+  const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null)
 
   const total = useMemo(() => {
     return Object.values(amounts).reduce((sum, value) => {
@@ -35,9 +32,60 @@ function SalesEntryPage() {
     }, 0)
   }, [amounts])
 
+  useEffect(() => {
+    let isCancelled = false
+
+    void getSalesRecord(date).then((record) => {
+      if (isCancelled) {
+        return
+      }
+
+      setAmounts(createAmountInputs(record))
+      setNotes(record?.note ?? '')
+      setFeedbackMessage(
+        record
+          ? record.status === 'draft'
+            ? '已加载该日期的营业额草稿。'
+            : '已加载该日期的已提交营业额。'
+          : null,
+      )
+    })
+
+    return () => {
+      isCancelled = true
+    }
+  }, [date])
+
   const handleAmountChange = (channelId: string, value: string) => {
     if (value === '' || /^\d*\.?\d*$/.test(value)) {
       setAmounts((previous) => ({ ...previous, [channelId]: value }))
+    }
+  }
+
+  const persistSales = async (mode: 'draft' | 'submit') => {
+    setIsPersisting(true)
+
+    try {
+      const payload = {
+        date,
+        amounts: {
+          bbva: amounts.bbva ?? '',
+          caixa: amounts.caixa ?? '',
+          efectivo: amounts.efectivo ?? '',
+        },
+        notes,
+      }
+
+      const savedRecord =
+        mode === 'draft'
+          ? await saveSalesDraft(payload)
+          : await submitSalesEntry(payload)
+
+      setAmounts(createAmountInputs(savedRecord))
+      setNotes(savedRecord.note)
+      setFeedbackMessage(mode === 'draft' ? '营业额草稿已保存。' : '今日营业额已提交。')
+    } finally {
+      setIsPersisting(false)
     }
   }
 
@@ -79,7 +127,7 @@ function SalesEntryPage() {
               <CardTitle className="text-base">收款渠道</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              {paymentChannels.map((channel) => (
+              {loaderData.paymentChannels.map((channel) => (
                 <div key={channel.id} className="space-y-2">
                   <Label htmlFor={channel.id} className="flex items-center gap-2">
                     <span className={`h-2.5 w-2.5 rounded-full ${channel.color}`} />
@@ -123,12 +171,27 @@ function SalesEntryPage() {
             </CardContent>
           </Card>
 
+          {feedbackMessage ? (
+            <div className="mb-6 rounded-xl border bg-secondary/50 px-4 py-3 text-sm text-muted-foreground">
+              {feedbackMessage}
+            </div>
+          ) : null}
+
           <div className="flex gap-3">
-            <Button variant="secondary" className="flex-1 rounded-lg">
+            <Button
+              variant="secondary"
+              className="flex-1 rounded-lg"
+              disabled={isPersisting}
+              onClick={() => void persistSales('draft')}
+            >
               <Save className="mr-2 h-4 w-4" />
               保存草稿
             </Button>
-            <Button className="flex-1 rounded-lg">
+            <Button
+              className="flex-1 rounded-lg"
+              disabled={isPersisting}
+              onClick={() => void persistSales('submit')}
+            >
               <CheckCircle className="mr-2 h-4 w-4" />
               确认提交
             </Button>
@@ -139,8 +202,22 @@ function SalesEntryPage() {
   )
 }
 
-function getTodayInputValue() {
-  return new Intl.DateTimeFormat('sv-SE', {
-    timeZone: 'Europe/Madrid',
-  }).format(new Date())
+function createAmountInputs(record: SalesDailyRecord | null) {
+  if (!record) {
+    return {
+      bbva: '',
+      caixa: '',
+      efectivo: '',
+    }
+  }
+
+  return {
+    bbva: formatAmountInput(record.bbvaAmount),
+    caixa: formatAmountInput(record.caixaAmount),
+    efectivo: formatAmountInput(record.cashAmount),
+  }
+}
+
+function formatAmountInput(value: number) {
+  return value === 0 ? '' : value.toFixed(2)
 }

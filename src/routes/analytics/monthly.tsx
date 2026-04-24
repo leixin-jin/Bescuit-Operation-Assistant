@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Link, createFileRoute } from '@tanstack/react-router'
 import {
   ArrowLeft,
@@ -17,32 +18,34 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-
-const incomeData = [
-  { name: 'BBVA', value: 12500, percentage: 45 },
-  { name: 'CAIXA', value: 8300, percentage: 30 },
-  { name: 'EFECTIVO', value: 6900, percentage: 25 },
-]
-
-const expenseData = [
-  { name: '酒水采购', value: 8500, percentage: 55 },
-  { name: '食材', value: 3200, percentage: 21 },
-  { name: '人工', value: 2400, percentage: 16 },
-  { name: '其他', value: 1200, percentage: 8 },
-]
-
-const weeklyData = [
-  { week: '第1周', income: 6200, expense: 3800 },
-  { week: '第2周', income: 7100, expense: 4200 },
-  { week: '第3周', income: 6800, expense: 3900 },
-  { week: '第4周', income: 7600, expense: 4100 },
-]
+import type { MonthlyAnalyticsSummary } from '@/lib/server/app-domain'
+import { getMonthlyAnalyticsSummary } from '@/lib/server/queries/analytics'
 
 export const Route = createFileRoute('/analytics/monthly')({
+  loader: () => getMonthlyAnalyticsSummary(),
   component: AnalyticsMonthlyPage,
 })
 
 function AnalyticsMonthlyPage() {
+  const loaderData = Route.useLoaderData()
+  const [selectedMonth, setSelectedMonth] = useState(loaderData.selectedMonth)
+  const [analyticsSummary, setAnalyticsSummary] =
+    useState<MonthlyAnalyticsSummary>(loaderData)
+
+  useEffect(() => {
+    let isCancelled = false
+
+    void getMonthlyAnalyticsSummary(selectedMonth).then((nextSummary) => {
+      if (!isCancelled) {
+        setAnalyticsSummary(nextSummary)
+      }
+    })
+
+    return () => {
+      isCancelled = true
+    }
+  }, [selectedMonth])
+
   return (
     <AppShell>
       <div className="p-6 lg:p-10">
@@ -58,14 +61,16 @@ function AnalyticsMonthlyPage() {
             <h1 className="text-2xl font-bold">数据分析</h1>
             <p className="mt-1 text-muted-foreground">查看收入与支出的详细分析</p>
           </div>
-          <Select defaultValue="2024-01">
+          <Select value={selectedMonth} onValueChange={setSelectedMonth}>
             <SelectTrigger className="w-40 rounded-lg">
               <SelectValue placeholder="选择月份" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="2024-01">2024年1月</SelectItem>
-              <SelectItem value="2023-12">2023年12月</SelectItem>
-              <SelectItem value="2023-11">2023年11月</SelectItem>
+              {analyticsSummary.monthOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -73,29 +78,29 @@ function AnalyticsMonthlyPage() {
         <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <MetricCard
             title="总收入"
-            value="€27,700"
+            value={`€${analyticsSummary.totalIncome.toLocaleString()}`}
             description="较上月"
-            trend={{ value: 12.5, isPositive: true }}
+            trend={{ value: analyticsSummary.incomeTrend, isPositive: analyticsSummary.incomeTrend >= 0 }}
             icon={<TrendingUp className="h-4 w-4" />}
           />
           <MetricCard
             title="总支出"
-            value="€15,300"
+            value={`€${analyticsSummary.totalExpense.toLocaleString()}`}
             description="较上月"
-            trend={{ value: 3.2, isPositive: false }}
+            trend={{ value: Math.abs(analyticsSummary.expenseTrend), isPositive: analyticsSummary.expenseTrend <= 0 }}
             icon={<ShoppingCart className="h-4 w-4" />}
           />
           <MetricCard
             title="净利润"
-            value="€12,400"
+            value={`€${analyticsSummary.totalNet.toLocaleString()}`}
             description="较上月"
-            trend={{ value: 8.7, isPositive: true }}
+            trend={{ value: analyticsSummary.netTrend, isPositive: analyticsSummary.netTrend >= 0 }}
             icon={<Euro className="h-4 w-4" />}
           />
           <MetricCard
             title="利润率"
-            value="44.8%"
-            description="较上月 +2.1%"
+            value={`${analyticsSummary.profitMargin.toFixed(1)}%`}
+            description={`较上月 ${analyticsSummary.marginDelta >= 0 ? '+' : ''}${analyticsSummary.marginDelta.toFixed(1)}%`}
             icon={<TrendingUp className="h-4 w-4" />}
           />
         </div>
@@ -112,43 +117,28 @@ function AnalyticsMonthlyPage() {
               <div className="flex gap-8">
                 <div className="relative h-40 w-40 shrink-0">
                   <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
-                    <circle
-                      cx="50"
-                      cy="50"
-                      r="40"
-                      fill="none"
-                      stroke="hsl(var(--chart-1))"
-                      strokeWidth="20"
-                      strokeDasharray="113 252"
-                      strokeDashoffset="0"
-                    />
-                    <circle
-                      cx="50"
-                      cy="50"
-                      r="40"
-                      fill="none"
-                      stroke="hsl(var(--chart-2))"
-                      strokeWidth="20"
-                      strokeDasharray="75 252"
-                      strokeDashoffset="-113"
-                    />
-                    <circle
-                      cx="50"
-                      cy="50"
-                      r="40"
-                      fill="none"
-                      stroke="hsl(var(--chart-3))"
-                      strokeWidth="20"
-                      strokeDasharray="63 252"
-                      strokeDashoffset="-188"
-                    />
+                    {renderDonutSegments(analyticsSummary.incomeBreakdown).map((segment) => (
+                      <circle
+                        key={segment.name}
+                        cx="50"
+                        cy="50"
+                        r="40"
+                        fill="none"
+                        stroke={segment.color}
+                        strokeWidth="20"
+                        strokeDasharray={`${segment.length} 252`}
+                        strokeDashoffset={segment.offset}
+                      />
+                    ))}
                   </svg>
                   <div className="absolute inset-0 flex items-center justify-center">
-                    <span className="text-lg font-bold">€27.7K</span>
+                    <span className="text-lg font-bold">
+                      €{analyticsSummary.totalIncome.toLocaleString()}
+                    </span>
                   </div>
                 </div>
                 <div className="flex flex-col justify-center gap-3">
-                  {incomeData.map((item, index) => (
+                  {analyticsSummary.incomeBreakdown.map((item, index) => (
                     <div key={item.name} className="flex items-center gap-3">
                       <div
                         className="h-3 w-3 rounded-full"
@@ -178,7 +168,7 @@ function AnalyticsMonthlyPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
-                {expenseData.map((item, index) => (
+                {analyticsSummary.expenseBreakdown.map((item, index) => (
                   <div key={item.name}>
                     <div className="mb-1 flex items-center justify-between text-sm">
                       <span>{item.name}</span>
@@ -205,16 +195,26 @@ function AnalyticsMonthlyPage() {
             </CardHeader>
             <CardContent>
               <div className="flex h-48 items-end justify-around gap-4">
-                {weeklyData.map((week) => (
+                {analyticsSummary.weeklyTrend.map((week) => (
                   <div key={week.week} className="flex flex-1 flex-col items-center gap-2">
                     <div className="flex w-full items-end justify-center gap-1">
                       <div
                         className="w-8 rounded-t-md bg-emerald-500"
-                        style={{ height: `${(week.income / 8000) * 150}px` }}
+                        style={{
+                          height: `${getBarHeight(
+                            week.income,
+                            analyticsSummary.weeklyTrend,
+                          )}px`,
+                        }}
                       />
                       <div
                         className="w-8 rounded-t-md bg-red-400"
-                        style={{ height: `${(week.expense / 8000) * 150}px` }}
+                        style={{
+                          height: `${getBarHeight(
+                            week.expense,
+                            analyticsSummary.weeklyTrend,
+                          )}px`,
+                        }}
                       />
                     </div>
                     <span className="text-xs text-muted-foreground">{week.week}</span>
@@ -237,4 +237,31 @@ function AnalyticsMonthlyPage() {
       </div>
     </AppShell>
   )
+}
+
+function renderDonutSegments(
+  entries: MonthlyAnalyticsSummary['incomeBreakdown'],
+) {
+  let offset = 0
+
+  return entries.map((entry, index) => {
+    const length = Math.round((entry.percentage / 100) * 252)
+    const segment = {
+      name: entry.name,
+      length,
+      offset: -offset,
+      color: `hsl(var(--chart-${index + 1}))`,
+    }
+
+    offset += length
+    return segment
+  })
+}
+
+function getBarHeight(
+  value: number,
+  weeklyTrend: MonthlyAnalyticsSummary['weeklyTrend'],
+) {
+  const peakValue = Math.max(...weeklyTrend.flatMap((week) => [week.income, week.expense]), 1)
+  return Math.max(16, (value / peakValue) * 150)
 }

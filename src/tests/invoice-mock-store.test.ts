@@ -15,26 +15,26 @@ describe('invoice mock store', () => {
     window.sessionStorage.clear()
   })
 
-  test('unknown job ids do not create new records', () => {
-    expect(getInvoiceJob('missing-job')).toBeUndefined()
-    expect(listInvoiceJobs().map((job) => job.jobId)).not.toContain('missing-job')
+  test('unknown job ids do not create new records', async () => {
+    expect(await getInvoiceJob('missing-job')).toBeNull()
+    expect((await listInvoiceJobs()).map((job) => job.jobId)).not.toContain('missing-job')
   })
 
-  test('created jobs are scoped to the browser session store', () => {
-    const createdJob = createInvoiceJob('metro-upload.pdf')
+  test('created jobs are scoped to the browser session store', async () => {
+    const createdJob = await createInvoiceJob('metro-upload.pdf')
 
-    expect(listInvoiceJobs().map((job) => job.jobId)).toContain(createdJob.jobId)
+    expect((await listInvoiceJobs()).map((job) => job.jobId)).toContain(createdJob.jobId)
 
     window.sessionStorage.clear()
 
-    expect(getInvoiceJob(createdJob.jobId)).toBeUndefined()
-    expect(listInvoiceJobs().map((job) => job.jobId)).not.toContain(createdJob.jobId)
+    expect(await getInvoiceJob(createdJob.jobId)).toBeNull()
+    expect((await listInvoiceJobs()).map((job) => job.jobId)).not.toContain(createdJob.jobId)
   })
 
-  test('jobs stay in review when required header fields are missing', () => {
-    const createdJob = createInvoiceJob('metro-upload.pdf')
+  test('jobs stay in review when required header fields are missing', async () => {
+    const createdJob = await createInvoiceJob('metro-upload.pdf')
 
-    saveInvoiceJob({
+    await saveInvoiceJob({
       ...createdJob,
       lineItems: createdJob.lineItems.map((item, index) => ({
         ...item,
@@ -47,7 +47,7 @@ describe('invoice mock store', () => {
       },
     })
 
-    const storedJob = getInvoiceJob(createdJob.jobId)
+    const storedJob = await getInvoiceJob(createdJob.jobId)
 
     expect(storedJob?.status).toBe('needs_review')
     expect(getInvoiceReadinessSummary(storedJob!).missingHeaderFields).toEqual(
@@ -55,10 +55,10 @@ describe('invoice mock store', () => {
     )
   })
 
-  test('jobs become ready only after header fields and mappings are complete', () => {
-    const createdJob = createInvoiceJob('metro-upload.pdf')
+  test('jobs become ready only after header fields and mappings are complete', async () => {
+    const createdJob = await createInvoiceJob('metro-upload.pdf')
 
-    saveInvoiceJob({
+    await saveInvoiceJob({
       ...createdJob,
       lineItems: createdJob.lineItems.map((item, index) => ({
         ...item,
@@ -76,7 +76,7 @@ describe('invoice mock store', () => {
       },
     })
 
-    const storedJob = getInvoiceJob(createdJob.jobId)
+    const storedJob = await getInvoiceJob(createdJob.jobId)
 
     expect(storedJob?.status).toBe('ready')
     expect(getInvoiceReadinessSummary(storedJob!)).toMatchObject({
@@ -87,10 +87,10 @@ describe('invoice mock store', () => {
     })
   })
 
-  test('invalid amount formats block the ready status', () => {
-    const createdJob = createInvoiceJob('metro-upload.pdf')
+  test('invalid amount formats block the ready status', async () => {
+    const createdJob = await createInvoiceJob('metro-upload.pdf')
 
-    saveInvoiceJob({
+    await saveInvoiceJob({
       ...createdJob,
       lineItems: createdJob.lineItems.map((item, index) => ({
         ...item,
@@ -108,7 +108,7 @@ describe('invoice mock store', () => {
       },
     })
 
-    const storedJob = getInvoiceJob(createdJob.jobId)
+    const storedJob = await getInvoiceJob(createdJob.jobId)
 
     expect(storedJob?.status).toBe('needs_review')
     expect(getInvoiceReadinessSummary(storedJob!).invalidHeaderFields).toEqual([

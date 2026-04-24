@@ -21,30 +21,42 @@ import {
   validateInvoiceUpload,
 } from '@/features/invoices/intake-file-validation'
 import {
-  createInvoiceJob,
   formatInvoiceTimestamp,
-  getStatusLabel,
+  getInvoiceStatusLabel,
   listInvoiceJobs,
-  type InvoiceReviewJob,
-} from '@/features/invoices/mock-store'
+} from '@/lib/server/queries/invoices'
+import type { InvoiceReviewJob } from '@/lib/server/app-domain'
+import { createInvoiceIntakeJob } from '@/lib/server/mutations/invoices'
 
 export const Route = createFileRoute('/invoices/new')({
+  loader: () => listInvoiceJobs(),
   component: InvoiceIntakePage,
 })
 
 function InvoiceIntakePage() {
   const navigate = useNavigate()
+  const loaderData = Route.useLoaderData()
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [fileErrorMessage, setFileErrorMessage] = useState<string | null>(null)
-  const [recentJobs, setRecentJobs] = useState<InvoiceReviewJob[]>([])
-  const [hasLoadedJobs, setHasLoadedJobs] = useState(false)
+  const [recentJobs, setRecentJobs] = useState<InvoiceReviewJob[]>(loaderData)
 
   useEffect(() => {
-    setRecentJobs(listInvoiceJobs())
-    setHasLoadedJobs(true)
-  }, [])
+    let isCancelled = false
 
-  const handleCreateJob = () => {
+    setRecentJobs(loaderData)
+
+    void listInvoiceJobs().then((nextJobs) => {
+      if (!isCancelled) {
+        setRecentJobs(nextJobs)
+      }
+    })
+
+    return () => {
+      isCancelled = true
+    }
+  }, [loaderData])
+
+  const handleCreateJob = async () => {
     if (!selectedFile) {
       return
     }
@@ -55,9 +67,9 @@ function InvoiceIntakePage() {
       return
     }
 
-    const nextJob = createInvoiceJob(selectedFile.name)
+    const nextJob = await createInvoiceIntakeJob(selectedFile.name)
     setFileErrorMessage(null)
-    setRecentJobs(listInvoiceJobs())
+    setRecentJobs(await listInvoiceJobs())
     setSelectedFile(null)
 
     void navigate({
@@ -101,7 +113,7 @@ function InvoiceIntakePage() {
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-bold">发票 intake</h1>
             <Badge variant="secondary" className="rounded-lg">
-              Phase 4 本地版
+              Phase 5 本地版
             </Badge>
           </div>
           <p className="mt-1 text-muted-foreground">
@@ -118,7 +130,7 @@ function InvoiceIntakePage() {
                 上传发票
               </CardTitle>
               <CardDescription>
-                本 phase 先走本地 mock 流程，不接真实 OCR、Queue 和 D1。
+                当前通过 query/mutation 边界管理 intake job，后续可直接切换到真实 D1。
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -170,7 +182,7 @@ function InvoiceIntakePage() {
                 <Button
                   className="flex-1 rounded-lg"
                   disabled={!selectedFile}
-                  onClick={handleCreateJob}
+                  onClick={() => void handleCreateJob()}
                 >
                   <Camera className="mr-2 h-4 w-4" />
                   创建 intake 任务
@@ -192,11 +204,11 @@ function InvoiceIntakePage() {
             <CardHeader>
               <CardTitle className="text-base">最近任务</CardTitle>
               <CardDescription>
-                使用本地 mock store 模拟 intake job 列表与 review 入口。
+                route 只消费查询结果，任务状态由统一的数据边界返回。
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {hasLoadedJobs ? (
+              {recentJobs.length > 0 ? (
                 recentJobs.map((job) => (
                   <Link
                     key={job.jobId}
@@ -208,20 +220,19 @@ function InvoiceIntakePage() {
                       <div className="min-w-0">
                         <p className="truncate font-medium">{job.fileName}</p>
                         <p className="mt-1 text-sm text-muted-foreground">
-                          {job.header.supplier || '待补充供应商'} ·
-                          {' '}
+                          {job.header.supplier || '待补充供应商'} ·{' '}
                           {formatInvoiceTimestamp(job.uploadedAt)}
                         </p>
                       </div>
                       <Badge variant="secondary" className="shrink-0 rounded-lg">
-                        {getStatusLabel(job.status)}
+                        {getInvoiceStatusLabel(job.status)}
                       </Badge>
                     </div>
                   </Link>
                 ))
               ) : (
                 <div className="rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">
-                  正在读取当前浏览器会话中的任务列表…
+                  当前还没有 intake job。
                 </div>
               )}
             </CardContent>

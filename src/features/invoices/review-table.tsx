@@ -21,7 +21,7 @@ import {
 import type {
   IngredientOption,
   InvoiceLineItemDraft,
-} from './mock-store'
+} from '@/lib/server/app-domain'
 
 interface ReviewTableProps {
   lineItems: InvoiceLineItemDraft[]

@@ -325,7 +325,7 @@ Expected: Root Route 能正确加载 `globals.css`，构建时不再报 Next 专
 - Create: `src/lib/server/mutations/invoices.ts`
 - Reference: `doc/05_Web_App_开发计划_Cloudflare_TanStack.md`
 
-- [ ] **Step 1: 锁定第一批最小表**
+- [x] **Step 1: 锁定第一批最小表**
   - `sales_daily`
   - `source_documents`
   - `intake_jobs`
@@ -336,25 +336,25 @@ Expected: Root Route 能正确加载 `globals.css`，构建时不再报 Next 专
   - `ingredients`
   - `ingredient_aliases`
 
-- [ ] **Step 2: 建立第一版 migration**
+- [x] **Step 2: 建立第一版 migration**
   - 优先保证建表可执行
   - 不提前加入可选优化字段和二期表
 
-- [ ] **Step 3: 建立 D1 client 与 schema 入口**
+- [x] **Step 3: 建立 D1 client 与 schema 入口**
   - `schema.ts` 只定义表结构
   - `client.ts` 只负责创建数据库访问入口
 
-- [ ] **Step 4: 建立 dashboard / sales / invoices / analytics 查询层**
+- [x] **Step 4: 建立 dashboard / sales / invoices / analytics 查询层**
   - 首页 summary 归 `dashboard.ts`
   - 营业额数据归 `sales.ts`
   - 发票与 intake job 查询归 `invoices.ts`
   - 月分析与日历聚合归 `analytics.ts`
 
-- [ ] **Step 5: 建立写操作边界**
+- [x] **Step 5: 建立写操作边界**
   - `sales.ts` mutation 负责营业额录入
   - `invoices.ts` mutation 负责发票确认、修正与入账
 
-- [ ] **Step 6: 回查 route 文件职责**
+- [x] **Step 6: 回查 route 文件职责**
   - route 只保留 loader、action、组件组合
   - route 中不再直接维护 mock 数组作为数据源
 
