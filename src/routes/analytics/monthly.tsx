@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Link, createFileRoute } from '@tanstack/react-router'
 import {
   ArrowLeft,
@@ -29,22 +30,11 @@ export const Route = createFileRoute('/analytics/monthly')({
 function AnalyticsMonthlyPage() {
   const loaderData = Route.useLoaderData()
   const [selectedMonth, setSelectedMonth] = useState(loaderData.selectedMonth)
-  const [analyticsSummary, setAnalyticsSummary] =
-    useState<MonthlyAnalyticsSummary>(loaderData)
-
-  useEffect(() => {
-    let isCancelled = false
-
-    void getMonthlyAnalyticsSummary(selectedMonth).then((nextSummary) => {
-      if (!isCancelled) {
-        setAnalyticsSummary(nextSummary)
-      }
-    })
-
-    return () => {
-      isCancelled = true
-    }
-  }, [selectedMonth])
+  const { data: analyticsSummary = loaderData } = useQuery({
+    queryKey: ['monthly-analytics', selectedMonth],
+    queryFn: () => getMonthlyAnalyticsSummary(selectedMonth),
+    initialData: selectedMonth === loaderData.selectedMonth ? loaderData : undefined,
+  })
 
   return (
     <AppShell>

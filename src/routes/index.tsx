@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { Camera, CheckCircle2, Clock, TrendingUp, Wine } from 'lucide-react'
 
@@ -11,7 +11,6 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import type { DashboardSummary } from '@/lib/server/app-domain'
 import { getDashboardSummary } from '@/lib/server/queries/dashboard'
 
 export const Route = createFileRoute('/')({
@@ -21,23 +20,11 @@ export const Route = createFileRoute('/')({
 
 function HomePage() {
   const dashboardSummary = Route.useLoaderData()
-  const [summary, setSummary] = useState<DashboardSummary>(dashboardSummary)
-
-  useEffect(() => {
-    let isCancelled = false
-
-    setSummary(dashboardSummary)
-
-    void getDashboardSummary().then((nextSummary) => {
-      if (!isCancelled) {
-        setSummary(nextSummary)
-      }
-    })
-
-    return () => {
-      isCancelled = true
-    }
-  }, [dashboardSummary])
+  const { data: summary } = useQuery({
+    queryKey: ['dashboard-summary'],
+    queryFn: getDashboardSummary,
+    initialData: dashboardSummary,
+  })
 
   return (
     <div className="flex min-h-screen flex-col bg-background">

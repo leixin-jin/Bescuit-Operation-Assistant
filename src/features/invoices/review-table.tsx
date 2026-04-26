@@ -1,3 +1,10 @@
+import { useMemo } from 'react'
+import {
+  createColumnHelper,
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+} from '@tanstack/react-table'
 import { AlertCircle } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
@@ -41,6 +48,105 @@ export function ReviewTable({
   onIngredientChange,
 }: ReviewTableProps) {
   const unmatchedCount = lineItems.filter((item) => !item.matched).length
+  const columns = useMemo(() => {
+    const columnHelper = createColumnHelper<InvoiceLineItemDraft>()
+
+    return [
+      columnHelper.display({
+        id: 'status',
+        header: '',
+        cell: ({ row }) => (
+          <div
+            className={`h-2.5 w-2.5 rounded-full ${
+              row.original.matched ? 'bg-emerald-500' : 'bg-amber-500'
+            }`}
+          />
+        ),
+      }),
+      columnHelper.accessor('name', {
+        header: '品名',
+        cell: ({ getValue }) => <span className="font-medium">{getValue()}</span>,
+      }),
+      columnHelper.display({
+        id: 'quantity',
+        header: () => <span className="block text-right">数量</span>,
+        cell: ({ row }) => (
+          <div className="flex items-center justify-end gap-2">
+            <Input
+              disabled={disabled}
+              value={row.original.qty}
+              onChange={(event) => onQuantityChange(row.original.id, event.target.value)}
+              className="h-8 w-20 rounded-lg text-right"
+            />
+            <span className="text-xs text-muted-foreground">{row.original.unit}</span>
+          </div>
+        ),
+      }),
+      columnHelper.display({
+        id: 'unitPrice',
+        header: () => <span className="block text-right">单价</span>,
+        cell: ({ row }) => (
+          <div className="flex items-center justify-end gap-2">
+            <span className="text-xs text-muted-foreground">€</span>
+            <Input
+              disabled={disabled}
+              value={row.original.unitPrice}
+              onChange={(event) => onUnitPriceChange(row.original.id, event.target.value)}
+              className="h-8 w-24 rounded-lg text-right"
+            />
+          </div>
+        ),
+      }),
+      columnHelper.display({
+        id: 'lineTotal',
+        header: () => <span className="block text-right">小计</span>,
+        cell: ({ row }) => {
+          const lineTotal =
+            (Number.parseFloat(row.original.qty) || 0) *
+            (Number.parseFloat(row.original.unitPrice) || 0)
+
+          return (
+            <span className="block text-right font-medium">
+              €{lineTotal.toFixed(2)}
+            </span>
+          )
+        },
+      }),
+      columnHelper.display({
+        id: 'ingredient',
+        header: '原料映射',
+        cell: ({ row }) => (
+          <Select
+            disabled={disabled}
+            value={row.original.ingredient}
+            onValueChange={(value) => onIngredientChange(row.original.id, value)}
+          >
+            <SelectTrigger className="h-8 w-full rounded-lg text-xs">
+              <SelectValue placeholder="选择原料" />
+            </SelectTrigger>
+            <SelectContent>
+              {ingredientOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ),
+      }),
+    ]
+  }, [
+    disabled,
+    ingredientOptions,
+    onIngredientChange,
+    onQuantityChange,
+    onUnitPriceChange,
+  ])
+  const table = useReactTable({
+    data: lineItems,
+    columns,
+    getCoreRowModel: getCoreRowModel(),
+  })
 
   return (
     <>
@@ -57,81 +163,31 @@ export function ReviewTable({
           <div className="overflow-auto">
             <Table>
               <TableHeader>
-                <TableRow>
-                  <TableHead className="w-10" />
-                  <TableHead className="min-w-44">品名</TableHead>
-                  <TableHead className="min-w-24 text-right">数量</TableHead>
-                  <TableHead className="min-w-28 text-right">单价</TableHead>
-                  <TableHead className="min-w-28 text-right">小计</TableHead>
-                  <TableHead className="min-w-52">原料映射</TableHead>
-                </TableRow>
+                {table.getHeaderGroups().map((headerGroup) => (
+                  <TableRow key={headerGroup.id}>
+                    {headerGroup.headers.map((header) => (
+                      <TableHead key={header.id} className={getColumnClassName(header.column.id)}>
+                        {header.isPlaceholder
+                          ? null
+                          : flexRender(
+                              header.column.columnDef.header,
+                              header.getContext(),
+                            )}
+                      </TableHead>
+                    ))}
+                  </TableRow>
+                ))}
               </TableHeader>
               <TableBody>
-                {lineItems.map((item) => {
-                  const lineTotal =
-                    (Number.parseFloat(item.qty) || 0) *
-                    (Number.parseFloat(item.unitPrice) || 0)
-
-                  return (
-                    <TableRow key={item.id}>
-                      <TableCell>
-                        <div
-                          className={`h-2.5 w-2.5 rounded-full ${
-                            item.matched ? 'bg-emerald-500' : 'bg-amber-500'
-                          }`}
-                        />
+                {table.getRowModel().rows.map((row) => (
+                  <TableRow key={row.id}>
+                    {row.getVisibleCells().map((cell) => (
+                      <TableCell key={cell.id}>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </TableCell>
-                      <TableCell className="font-medium">{item.name}</TableCell>
-                      <TableCell>
-                        <div className="flex items-center justify-end gap-2">
-                          <Input
-                            disabled={disabled}
-                            value={item.qty}
-                            onChange={(event) =>
-                              onQuantityChange(item.id, event.target.value)
-                            }
-                            className="h-8 w-20 rounded-lg text-right"
-                          />
-                          <span className="text-xs text-muted-foreground">{item.unit}</span>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center justify-end gap-2">
-                          <span className="text-xs text-muted-foreground">€</span>
-                          <Input
-                            disabled={disabled}
-                            value={item.unitPrice}
-                            onChange={(event) =>
-                              onUnitPriceChange(item.id, event.target.value)
-                            }
-                            className="h-8 w-24 rounded-lg text-right"
-                          />
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-right font-medium">
-                        €{lineTotal.toFixed(2)}
-                      </TableCell>
-                      <TableCell>
-                        <Select
-                          disabled={disabled}
-                          value={item.ingredient}
-                          onValueChange={(value) => onIngredientChange(item.id, value)}
-                        >
-                          <SelectTrigger className="h-8 w-full rounded-lg text-xs">
-                            <SelectValue placeholder="选择原料" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {ingredientOptions.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
+                    ))}
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
           </div>
@@ -157,4 +213,22 @@ export function ReviewTable({
       )}
     </>
   )
+}
+
+function getColumnClassName(columnId: string) {
+  switch (columnId) {
+    case 'status':
+      return 'w-10'
+    case 'name':
+      return 'min-w-44'
+    case 'quantity':
+      return 'min-w-24 text-right'
+    case 'unitPrice':
+    case 'lineTotal':
+      return 'min-w-28 text-right'
+    case 'ingredient':
+      return 'min-w-52'
+    default:
+      return undefined
+  }
 }

@@ -1,5 +1,6 @@
-import { useEffect, useState, type ChangeEvent } from 'react'
-import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
+import { useState, type ChangeEvent } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link, createFileRoute, useNavigate, useRouter } from '@tanstack/react-router'
 import { ArrowLeft, Camera, FileImage, Upload } from 'lucide-react'
 
 import { AppShell } from '@/components/app-shell'
@@ -20,18 +21,17 @@ import {
   MAX_INVOICE_UPLOAD_SIZE_BYTES,
   validateInvoiceUpload,
 } from '@/features/invoices/intake-file-validation'
+import { createInvoiceIntakeJob } from '@/lib/server/mutations/invoices'
+import { uploadInvoiceIntakeDocument } from '@/lib/server/mutations/invoices.rpc'
 import {
   formatInvoiceTimestamp,
   getInvoiceStatusLabel,
   listInvoiceJobs,
 } from '@/lib/server/queries/invoices'
-import type { InvoiceReviewJob } from '@/lib/server/app-domain'
-import { createInvoiceIntakeJob } from '@/lib/server/mutations/invoices'
 import {
   getInvoicePipelineEnabled,
   listInvoiceJobsServerFn,
 } from '@/lib/server/queries/invoices.rpc'
-import { uploadInvoiceIntakeDocument } from '@/lib/server/mutations/invoices.rpc'
 
 export const Route = createFileRoute('/invoices/new')({
   loader: async () => {
@@ -50,35 +50,51 @@ export const Route = createFileRoute('/invoices/new')({
 
 function InvoiceIntakePage() {
   const navigate = useNavigate()
+  const router = useRouter()
+  const queryClient = useQueryClient()
   const loaderData = Route.useLoaderData()
   const { pipelineEnabled } = loaderData
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [fileErrorMessage, setFileErrorMessage] = useState<string | null>(null)
-  const [isCreatingJob, setIsCreatingJob] = useState(false)
-  const [recentJobs, setRecentJobs] = useState<InvoiceReviewJob[]>(
-    loaderData.recentJobs,
-  )
 
-  useEffect(() => {
-    let isCancelled = false
+  const recentJobsQuery = useQuery({
+    queryKey: ['invoice-jobs', pipelineEnabled],
+    queryFn: () =>
+      pipelineEnabled ? listInvoiceJobsServerFn() : listInvoiceJobs(),
+    initialData: loaderData.recentJobs,
+  })
+  const recentJobs = recentJobsQuery.data ?? []
 
-    setRecentJobs(loaderData.recentJobs)
+  const createJobMutation = useMutation({
+    mutationFn: (file: File) =>
+      pipelineEnabled
+        ? uploadInvoiceIntakeDocument({
+            data: createUploadFormData(file),
+          })
+        : createInvoiceIntakeJob(file.name),
+    onSuccess: async (nextJob) => {
+      setFileErrorMessage(null)
+      setSelectedFile(null)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['invoice-jobs'] }),
+        queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] }),
+        router.invalidate(),
+      ])
 
-    const loadJobs = pipelineEnabled ? listInvoiceJobsServerFn : listInvoiceJobs
-
-    void loadJobs().then((nextJobs) => {
-      if (!isCancelled) {
-        setRecentJobs(nextJobs)
-      }
-    })
-
-    return () => {
-      isCancelled = true
-    }
-  }, [loaderData.recentJobs, pipelineEnabled])
+      void navigate({
+        to: '/invoices/review/$jobId',
+        params: { jobId: nextJob.jobId },
+      })
+    },
+    onError: (error) => {
+      setFileErrorMessage(
+        error instanceof Error ? error.message : '创建 intake 任务失败。',
+      )
+    },
+  })
 
   const handleCreateJob = async () => {
-    if (!selectedFile || isCreatingJob) {
+    if (!selectedFile || createJobMutation.isPending) {
       return
     }
 
@@ -88,32 +104,7 @@ function InvoiceIntakePage() {
       return
     }
 
-    setIsCreatingJob(true)
-
-    try {
-      const nextJob = pipelineEnabled
-        ? await uploadInvoiceIntakeDocument({
-            data: createUploadFormData(selectedFile),
-          })
-        : await createInvoiceIntakeJob(selectedFile.name)
-
-      setFileErrorMessage(null)
-      setRecentJobs(
-        pipelineEnabled ? await listInvoiceJobsServerFn() : await listInvoiceJobs(),
-      )
-      setSelectedFile(null)
-
-      void navigate({
-        to: '/invoices/review/$jobId',
-        params: { jobId: nextJob.jobId },
-      })
-    } catch (error) {
-      setFileErrorMessage(
-        error instanceof Error ? error.message : '创建 intake 任务失败。',
-      )
-    } finally {
-      setIsCreatingJob(false)
-    }
+    createJobMutation.mutate(selectedFile)
   }
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -224,11 +215,11 @@ function InvoiceIntakePage() {
               <div className="flex flex-col gap-3 sm:flex-row">
                 <Button
                   className="flex-1 rounded-lg"
-                  disabled={!selectedFile || isCreatingJob}
+                  disabled={!selectedFile || createJobMutation.isPending}
                   onClick={() => void handleCreateJob()}
                 >
                   <Camera className="mr-2 h-4 w-4" />
-                  {isCreatingJob ? '创建中…' : '创建 intake 任务'}
+                  {createJobMutation.isPending ? '创建中...' : '创建 intake 任务'}
                 </Button>
                 <Button variant="secondary" className="flex-1 rounded-lg" asChild>
                   <Link
