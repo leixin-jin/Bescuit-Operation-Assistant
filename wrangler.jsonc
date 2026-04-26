@@ -7,12 +7,33 @@
   "observability": {
     "enabled": true
   },
-  // Phase 5-6 bindings:
-  // "d1_databases": [{ "binding": "DB", "database_name": "bescuit-operation-assistant-db", "database_id": "<D1_DATABASE_ID>" }],
-  // "r2_buckets": [{ "binding": "INVOICE_UPLOADS", "bucket_name": "bescuit-operation-assistant-uploads" }],
-  // "queues": {
-  //   "producers": [{ "binding": "INVOICE_QUEUE", "queue": "bescuit-operation-assistant-invoice-queue" }],
-  //   "consumers": [{ "queue": "bescuit-operation-assistant-invoice-queue" }]
-  // },
-  // "ai": { "binding": "AI" }
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bescuit-operation-assistant-db",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RAW_DOCUMENTS",
+      "bucket_name": "bescuit-operation-assistant-raw-documents"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "INTAKE_QUEUE",
+        "queue": "bescuit-operation-assistant-intake-queue"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "bescuit-operation-assistant-intake-queue"
+      }
+    ]
+  },
+  "ai": {
+    "binding": "AI"
+  }
 }
