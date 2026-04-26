@@ -1,7 +1,9 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
 
 import { Toaster } from '@/components/ui/toaster'
+import { createAppQueryClient } from '@/lib/query-client'
 import appCss from '@/styles/globals.css?url'
 
 export const Route = createRootRoute({
@@ -43,14 +45,18 @@ export const Route = createRootRoute({
 })
 
 function RootDocument({ children }: { children: ReactNode }) {
+  const [queryClient] = useState(() => createAppQueryClient())
+
   return (
     <html lang="zh-CN" className="bg-background" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>
       <body className="min-h-dvh bg-background font-sans text-foreground antialiased">
-        {children}
-        <Toaster />
+        <QueryClientProvider client={queryClient}>
+          {children}
+          <Toaster />
+        </QueryClientProvider>
         <Scripts />
       </body>
     </html>

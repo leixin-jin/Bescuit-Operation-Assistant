@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Link, createFileRoute } from '@tanstack/react-router'
+import { useForm } from '@tanstack/react-form'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link, createFileRoute, useRouter } from '@tanstack/react-router'
 import { AlertCircle, ArrowLeft, CheckCircle, Save } from 'lucide-react'
 
 import { AppShell } from '@/components/app-shell'
@@ -8,7 +10,11 @@ import { Button } from '@/components/ui/button'
 import { DocumentPreview } from '@/features/invoices/document-preview'
 import { ReviewHeaderForm } from '@/features/invoices/review-header-form'
 import { ReviewTable } from '@/features/invoices/review-table'
-import type { InvoiceHeaderDraft, InvoiceReviewJob } from '@/lib/server/app-domain'
+import type {
+  InvoiceHeaderDraft,
+  InvoiceLineItemDraft,
+  InvoiceReviewJob,
+} from '@/lib/server/app-domain'
 import {
   confirmInvoiceReviewJob,
   saveInvoiceReviewJob,
@@ -26,127 +32,110 @@ export const Route = createFileRoute('/invoices/review/$jobId')({
 })
 
 function InvoiceReviewWorkbenchPage() {
+  const router = useRouter()
+  const queryClient = useQueryClient()
   const { jobId } = Route.useParams()
   const loaderData = Route.useLoaderData()
-  const [job, setJob] = useState<InvoiceReviewJob | null>(loaderData.job)
-  const [isRehydratingJob, setIsRehydratingJob] = useState(loaderData.job === null)
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null)
-  const [isSaving, setIsSaving] = useState(false)
   const [zoom, setZoom] = useState(100)
   const [rotation, setRotation] = useState(0)
   const [currentPage, setCurrentPage] = useState(1)
 
-  useEffect(() => {
-    let isCancelled = false
+  const reviewQuery = useQuery({
+    queryKey: ['invoice-review', jobId],
+    queryFn: () => getInvoiceReviewPageData(jobId),
+    initialData: loaderData.job?.jobId === jobId ? loaderData : undefined,
+  })
+  const pageData = reviewQuery.data ?? loaderData
+  const activeJob = pageData.job?.jobId === jobId ? pageData.job : null
+  const isRehydratingJob = !activeJob && reviewQuery.isFetching
 
-    setJob(loaderData.job)
-    setIsRehydratingJob(loaderData.job === null)
+  const form = useForm({
+    defaultValues: createInvoiceReviewFormValues(activeJob),
+    onSubmitMeta: { mode: 'draft' as ReviewPersistMode },
+    onSubmit: async ({ value, meta }) => {
+      if (!activeJob) {
+        return
+      }
+
+      await persistReviewMutation.mutateAsync({ mode: meta.mode, value })
+    },
+  })
+  const persistReviewMutation = useMutation({
+    mutationFn: async ({
+      mode,
+      value,
+    }: {
+      mode: ReviewPersistMode
+      value: InvoiceReviewFormValues
+    }) => {
+      if (!activeJob) {
+        throw new Error('Invoice review job is missing.')
+      }
+
+      const reviewJob = mergeReviewFormValues(activeJob, value)
+
+      if (mode === 'draft') {
+        const savedJob = await saveInvoiceReviewJob(reviewJob)
+        return {
+          mode,
+          ok: true,
+          job: savedJob,
+        }
+      }
+
+      const result = await confirmInvoiceReviewJob(reviewJob)
+      return {
+        mode,
+        ok: result.ok,
+        job: result.job,
+      }
+    },
+    onSuccess: async (result) => {
+      form.reset(createInvoiceReviewFormValues(result.job))
+      setFeedbackMessage(
+        result.mode === 'draft'
+          ? '发票草稿已保存。'
+          : result.ok
+            ? '发票已确认，后续可进入入账链路。'
+            : '仍有阻塞项，暂不能确认入账。',
+      )
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['invoice-review', jobId] }),
+        queryClient.invalidateQueries({ queryKey: ['invoice-jobs'] }),
+        queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] }),
+        queryClient.invalidateQueries({ queryKey: ['monthly-analytics'] }),
+        queryClient.invalidateQueries({ queryKey: ['calendar-analytics'] }),
+        router.invalidate(),
+      ])
+    },
+  })
+
+  useEffect(() => {
+    form.reset(createInvoiceReviewFormValues(activeJob))
     setFeedbackMessage(null)
     setZoom(100)
     setRotation(0)
     setCurrentPage(1)
+  }, [activeJob, form, jobId])
 
-    void getInvoiceReviewPageData(jobId).then((nextPageData) => {
-      if (isCancelled) {
-        return
-      }
-
-      setJob(nextPageData.job)
-      setIsRehydratingJob(false)
-    })
-
-    return () => {
-      isCancelled = true
-    }
-  }, [jobId, loaderData.job])
-
-  const activeJob = job?.jobId === jobId ? job : loaderData.job
-
-  const readinessSummary = activeJob
-    ? getInvoiceReadinessSummary(activeJob)
-    : {
-        isReady: false,
-        missingHeaderFields: [],
-        invalidHeaderFields: [],
-        unmatchedLineItems: 0,
-      }
-  const blockingIssueCount =
-    readinessSummary.missingHeaderFields.length +
-    readinessSummary.invalidHeaderFields.length +
-    (readinessSummary.unmatchedLineItems > 0 ? 1 : 0)
-
-  const updateJob = (updater: (currentJob: InvoiceReviewJob) => InvoiceReviewJob) => {
-    setJob((currentJob) => {
-      if (!currentJob) {
-        return currentJob
-      }
-
-      return updater(currentJob)
-    })
-  }
-
-  const handleHeaderFieldChange = (
-    field: keyof InvoiceHeaderDraft,
-    value: string,
-  ) => {
-    updateJob((currentJob) => ({
-      ...currentJob,
-      header: {
-        ...currentJob.header,
-        [field]: value,
-      },
-    }))
+  const handleHeaderFieldChange = (field: keyof InvoiceHeaderDraft, value: string) => {
+    form.setFieldValue(`header.${field}`, value)
   }
 
   const handleLineItemFieldChange = (
     itemId: string,
-    updater: (currentValue: string) => string,
+    value: string,
     field: 'qty' | 'unitPrice' | 'ingredient',
   ) => {
-    updateJob((currentJob) => ({
-      ...currentJob,
-      lineItems: currentJob.lineItems.map((item) =>
-        item.id === itemId
-          ? {
-              ...item,
-              [field]: updater(item[field]),
-            }
-          : item,
-      ),
-    }))
-  }
-
-  const handleSaveDraft = async () => {
-    if (!activeJob) {
+    const itemIndex = form.state.values.lineItems.findIndex((item) => item.id === itemId)
+    if (itemIndex === -1) {
       return
     }
 
-    setIsSaving(true)
-
-    try {
-      const savedJob = await saveInvoiceReviewJob(activeJob)
-      setJob(savedJob)
-      setFeedbackMessage('发票草稿已保存。')
-    } finally {
-      setIsSaving(false)
-    }
-  }
-
-  const handleConfirm = async () => {
-    if (!activeJob) {
-      return
-    }
-
-    setIsSaving(true)
-
-    try {
-      const result = await confirmInvoiceReviewJob(activeJob)
-      setJob(result.job)
-      setFeedbackMessage(
-        result.ok ? '发票已确认，后续可进入入账链路。' : '仍有阻塞项，暂不能确认入账。',
-      )
-    } finally {
-      setIsSaving(false)
+    form.setFieldValue(`lineItems[${itemIndex}].${field}`, value)
+    if (field === 'ingredient') {
+      form.setFieldValue(`lineItems[${itemIndex}].matched`, Boolean(value.trim()))
     }
   }
 
@@ -182,145 +171,221 @@ function InvoiceReviewWorkbenchPage() {
 
   return (
     <AppShell>
-      <div className="flex h-[calc(100vh-3.5rem)] flex-col lg:h-screen">
-        <div className="shrink-0 border-b bg-background px-6 py-4">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div className="min-w-0">
-              <Link
-                to="/invoices/new"
-                className="mb-3 inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
-              >
-                <ArrowLeft className="h-4 w-4" />
-                返回 intake
-              </Link>
-              <div className="flex flex-wrap items-center gap-3">
-                <h1 className="text-xl font-bold">发票 review 工作台</h1>
-                <Badge variant="secondary" className="rounded-lg">
-                  {getInvoiceStatusLabel(activeJob.status)}
-                </Badge>
-                <Badge variant="outline" className="rounded-lg">
-                  {activeJob.jobId}
-                </Badge>
-              </div>
-              <p className="mt-1 truncate text-sm text-muted-foreground">
-                {activeJob.fileName} · {formatInvoiceTimestamp(activeJob.uploadedAt)}
-              </p>
-            </div>
+      <form
+        className="flex h-[calc(100vh-3.5rem)] flex-col lg:h-screen"
+        onSubmit={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          void form.handleSubmit({ mode: 'confirm' })
+        }}
+      >
+        <form.Subscribe
+          selector={(state) => state.values}
+          children={(formValues) => {
+            const editableJob = mergeReviewFormValues(activeJob, formValues)
+            const readinessSummary = getInvoiceReadinessSummary(editableJob)
+            const blockingIssueCount =
+              readinessSummary.missingHeaderFields.length +
+              readinessSummary.invalidHeaderFields.length +
+              (readinessSummary.unmatchedLineItems > 0 ? 1 : 0)
 
-            {readinessSummary.isReady ? (
-              <Badge
-                variant="secondary"
-                className="gap-1.5 rounded-lg bg-emerald-100 text-emerald-700"
-              >
-                <CheckCircle className="h-3.5 w-3.5" />
-                已满足入账条件
-              </Badge>
-            ) : (
-              <Badge
-                variant="secondary"
-                className="gap-1.5 rounded-lg bg-amber-100 text-amber-700"
-              >
-                <AlertCircle className="h-3.5 w-3.5" />
-                {blockingIssueCount} 个入账阻塞项
-              </Badge>
-            )}
-          </div>
-        </div>
+            return (
+              <>
+                <div className="shrink-0 border-b bg-background px-6 py-4">
+                  <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                    <div className="min-w-0">
+                      <Link
+                        to="/invoices/new"
+                        className="mb-3 inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
+                      >
+                        <ArrowLeft className="h-4 w-4" />
+                        返回 intake
+                      </Link>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <h1 className="text-xl font-bold">发票 review 工作台</h1>
+                        <Badge variant="secondary" className="rounded-lg">
+                          {getInvoiceStatusLabel(editableJob.status)}
+                        </Badge>
+                        <Badge variant="outline" className="rounded-lg">
+                          {editableJob.jobId}
+                        </Badge>
+                      </div>
+                      <p className="mt-1 truncate text-sm text-muted-foreground">
+                        {editableJob.fileName} · {formatInvoiceTimestamp(editableJob.uploadedAt)}
+                      </p>
+                    </div>
 
-        <div className="flex flex-1 flex-col overflow-hidden lg:flex-row">
-          <div className="h-[45%] lg:h-full lg:w-[56%]">
-            <DocumentPreview
-              fileName={activeJob.fileName}
-              jobId={activeJob.jobId}
-              uploadedAtLabel={formatInvoiceTimestamp(activeJob.uploadedAt)}
-              currentPage={currentPage}
-              totalPages={activeJob.pageCount}
-              zoom={zoom}
-              rotation={rotation}
-              onZoomIn={() => setZoom((value) => Math.min(200, value + 10))}
-              onZoomOut={() => setZoom((value) => Math.max(50, value - 10))}
-              onRotate={() => setRotation((value) => (value + 90) % 360)}
-              onPreviousPage={() => setCurrentPage((value) => Math.max(1, value - 1))}
-              onNextPage={() =>
-                setCurrentPage((value) => Math.min(activeJob.pageCount, value + 1))
-              }
-            />
-          </div>
-
-          <div className="flex h-[55%] flex-col lg:h-full lg:w-[44%]">
-            <div className="flex-1 space-y-6 overflow-auto p-6">
-              <ReviewHeaderForm
-                header={activeJob.header}
-                onFieldChange={handleHeaderFieldChange}
-              />
-              <ReviewTable
-                lineItems={activeJob.lineItems}
-                ingredientOptions={loaderData.ingredientOptions}
-                onQuantityChange={(itemId, value) => {
-                  if (value === '' || /^\d*\.?\d*$/.test(value)) {
-                    handleLineItemFieldChange(itemId, () => value, 'qty')
-                  }
-                }}
-                onUnitPriceChange={(itemId, value) => {
-                  if (value === '' || /^\d*\.?\d*$/.test(value)) {
-                    handleLineItemFieldChange(itemId, () => value, 'unitPrice')
-                  }
-                }}
-                onIngredientChange={(itemId, value) =>
-                  handleLineItemFieldChange(itemId, () => value, 'ingredient')
-                }
-              />
-            </div>
-
-            <div className="shrink-0 border-t bg-background px-6 py-4">
-              {feedbackMessage ? (
-                <div className="mb-4 rounded-xl border bg-secondary/50 px-4 py-3 text-sm text-muted-foreground">
-                  {feedbackMessage}
+                    {readinessSummary.isReady ? (
+                      <Badge
+                        variant="secondary"
+                        className="gap-1.5 rounded-lg bg-emerald-100 text-emerald-700"
+                      >
+                        <CheckCircle className="h-3.5 w-3.5" />
+                        已满足入账条件
+                      </Badge>
+                    ) : (
+                      <Badge
+                        variant="secondary"
+                        className="gap-1.5 rounded-lg bg-amber-100 text-amber-700"
+                      >
+                        <AlertCircle className="h-3.5 w-3.5" />
+                        {blockingIssueCount} 个入账阻塞项
+                      </Badge>
+                    )}
+                  </div>
                 </div>
-              ) : null}
-              {readinessSummary.isReady ? null : (
-                <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">
-                  <p className="font-medium text-amber-800">入账前还需要补齐以下信息</p>
-                  {readinessSummary.missingHeaderFields.length > 0 ? (
-                    <p className="mt-2">
-                      缺少必填字段：{readinessSummary.missingHeaderFields.join('、')}
-                    </p>
-                  ) : null}
-                  {readinessSummary.invalidHeaderFields.length > 0 ? (
-                    <p className="mt-2">
-                      金额格式不正确：{readinessSummary.invalidHeaderFields.join('、')}
-                    </p>
-                  ) : null}
-                  {readinessSummary.unmatchedLineItems > 0 ? (
-                    <p className="mt-2">
-                      还有 {readinessSummary.unmatchedLineItems} 项商品未映射到原料库。
-                    </p>
-                  ) : null}
+
+                <div className="flex flex-1 flex-col overflow-hidden lg:flex-row">
+                  <div className="h-[45%] lg:h-full lg:w-[56%]">
+                    <DocumentPreview
+                      fileName={editableJob.fileName}
+                      jobId={editableJob.jobId}
+                      uploadedAtLabel={formatInvoiceTimestamp(editableJob.uploadedAt)}
+                      currentPage={currentPage}
+                      totalPages={editableJob.pageCount}
+                      zoom={zoom}
+                      rotation={rotation}
+                      onZoomIn={() => setZoom((value) => Math.min(200, value + 10))}
+                      onZoomOut={() => setZoom((value) => Math.max(50, value - 10))}
+                      onRotate={() => setRotation((value) => (value + 90) % 360)}
+                      onPreviousPage={() =>
+                        setCurrentPage((value) => Math.max(1, value - 1))
+                      }
+                      onNextPage={() =>
+                        setCurrentPage((value) =>
+                          Math.min(editableJob.pageCount, value + 1),
+                        )
+                      }
+                    />
+                  </div>
+
+                  <div className="flex h-[55%] flex-col lg:h-full lg:w-[44%]">
+                    <div className="flex-1 space-y-6 overflow-auto p-6">
+                      <ReviewHeaderForm
+                        header={editableJob.header}
+                        onFieldChange={handleHeaderFieldChange}
+                      />
+                      <ReviewTable
+                        lineItems={editableJob.lineItems}
+                        ingredientOptions={pageData.ingredientOptions}
+                        onQuantityChange={(itemId, value) => {
+                          if (isDecimalInput(value)) {
+                            handleLineItemFieldChange(itemId, value, 'qty')
+                          }
+                        }}
+                        onUnitPriceChange={(itemId, value) => {
+                          if (isDecimalInput(value)) {
+                            handleLineItemFieldChange(itemId, value, 'unitPrice')
+                          }
+                        }}
+                        onIngredientChange={(itemId, value) =>
+                          handleLineItemFieldChange(itemId, value, 'ingredient')
+                        }
+                      />
+                    </div>
+
+                    <div className="shrink-0 border-t bg-background px-6 py-4">
+                      {feedbackMessage ? (
+                        <div className="mb-4 rounded-xl border bg-secondary/50 px-4 py-3 text-sm text-muted-foreground">
+                          {feedbackMessage}
+                        </div>
+                      ) : null}
+                      {readinessSummary.isReady ? null : (
+                        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">
+                          <p className="font-medium text-amber-800">
+                            入账前还需要补齐以下信息
+                          </p>
+                          {readinessSummary.missingHeaderFields.length > 0 ? (
+                            <p className="mt-2">
+                              缺少必填字段：
+                              {readinessSummary.missingHeaderFields.join('、')}
+                            </p>
+                          ) : null}
+                          {readinessSummary.invalidHeaderFields.length > 0 ? (
+                            <p className="mt-2">
+                              金额格式不正确：
+                              {readinessSummary.invalidHeaderFields.join('、')}
+                            </p>
+                          ) : null}
+                          {readinessSummary.unmatchedLineItems > 0 ? (
+                            <p className="mt-2">
+                              还有 {readinessSummary.unmatchedLineItems}{' '}
+                              项商品未映射到原料库。
+                            </p>
+                          ) : null}
+                        </div>
+                      )}
+                      <div className="flex gap-3">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          className="flex-1 rounded-lg"
+                          disabled={persistReviewMutation.isPending}
+                          onClick={() => void form.handleSubmit({ mode: 'draft' })}
+                        >
+                          <Save className="mr-2 h-4 w-4" />
+                          保存草稿
+                        </Button>
+                        <Button
+                          type="submit"
+                          className="flex-1 rounded-lg"
+                          disabled={!readinessSummary.isReady || persistReviewMutation.isPending}
+                        >
+                          <CheckCircle className="mr-2 h-4 w-4" />
+                          确认入账
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              )}
-              <div className="flex gap-3">
-                <Button
-                  variant="secondary"
-                  className="flex-1 rounded-lg"
-                  disabled={isSaving}
-                  onClick={() => void handleSaveDraft()}
-                >
-                  <Save className="mr-2 h-4 w-4" />
-                  保存草稿
-                </Button>
-                <Button
-                  className="flex-1 rounded-lg"
-                  disabled={!readinessSummary.isReady || isSaving}
-                  onClick={() => void handleConfirm()}
-                >
-                  <CheckCircle className="mr-2 h-4 w-4" />
-                  确认入账
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+              </>
+            )
+          }}
+        />
+      </form>
     </AppShell>
   )
+}
+
+type ReviewPersistMode = 'draft' | 'confirm'
+
+interface InvoiceReviewFormValues {
+  header: InvoiceHeaderDraft
+  lineItems: InvoiceLineItemDraft[]
+}
+
+function createInvoiceReviewFormValues(
+  job: InvoiceReviewJob | null,
+): InvoiceReviewFormValues {
+  return {
+    header: job
+      ? { ...job.header }
+      : {
+          supplier: '',
+          invoiceNo: '',
+          date: '',
+          totalAmount: '',
+          taxAmount: '',
+          notes: '',
+        },
+    lineItems: job ? job.lineItems.map((item) => ({ ...item })) : [],
+  }
+}
+
+function mergeReviewFormValues(
+  job: InvoiceReviewJob,
+  values: InvoiceReviewFormValues,
+): InvoiceReviewJob {
+  return {
+    ...job,
+    header: { ...values.header },
+    lineItems: values.lineItems.map((item) => ({
+      ...item,
+      matched: Boolean(item.ingredient.trim()),
+    })),
+  }
+}
+
+function isDecimalInput(value: string) {
+  return value === '' || /^\d*\.?\d*$/.test(value)
 }

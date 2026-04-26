@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link, createFileRoute } from '@tanstack/react-router'
+import { useEffect, useState } from 'react'
+import { useForm } from '@tanstack/react-form'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link, createFileRoute, useRouter } from '@tanstack/react-router'
 import { ArrowLeft, CalendarIcon, CheckCircle, Euro, Save } from 'lucide-react'
 
 import { AppShell } from '@/components/app-shell'
@@ -8,8 +10,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import type { SalesDailyRecord } from '@/lib/server/app-domain'
-import { getSalesEntryPageData, getSalesRecord } from '@/lib/server/queries/sales'
+import type { SalesDailyDraftInput, SalesDailyRecord } from '@/lib/server/app-domain'
+import { getSalesEntryPageData } from '@/lib/server/queries/sales'
 import { saveSalesDraft, submitSalesEntry } from '@/lib/server/mutations/sales'
 
 export const Route = createFileRoute('/sales/new')({
@@ -18,76 +20,67 @@ export const Route = createFileRoute('/sales/new')({
 })
 
 function SalesEntryPage() {
+  const router = useRouter()
+  const queryClient = useQueryClient()
   const loaderData = Route.useLoaderData()
-  const [amounts, setAmounts] = useState(() => createAmountInputs(loaderData.existingRecord))
-  const [date, setDate] = useState(loaderData.date)
-  const [notes, setNotes] = useState(loaderData.existingRecord?.note ?? '')
-  const [isPersisting, setIsPersisting] = useState(false)
+  const [businessDate, setBusinessDate] = useState(loaderData.date)
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null)
 
-  const total = useMemo(() => {
-    return Object.values(amounts).reduce((sum, value) => {
-      const amount = parseFloat(value) || 0
-      return sum + amount
-    }, 0)
-  }, [amounts])
+  const salesEntryQuery = useQuery({
+    queryKey: ['sales-entry', businessDate],
+    queryFn: () => getSalesEntryPageData(businessDate),
+    initialData: businessDate === loaderData.date ? loaderData : undefined,
+  })
+  const salesEntryData = salesEntryQuery.data ?? loaderData
+
+  const saveSalesMutation = useMutation({
+    mutationFn: async ({
+      mode,
+      value,
+    }: {
+      mode: SalesPersistMode
+      value: SalesFormValues
+    }) => {
+      const payload = toSalesPayload(value)
+      return mode === 'draft' ? saveSalesDraft(payload) : submitSalesEntry(payload)
+    },
+    onSuccess: async (savedRecord, variables) => {
+      form.reset(createSalesFormValues(savedRecord, savedRecord.date))
+      setBusinessDate(savedRecord.date)
+      setFeedbackMessage(
+        variables.mode === 'draft' ? '营业额草稿已保存。' : '今日营业额已提交。',
+      )
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] }),
+        queryClient.invalidateQueries({ queryKey: ['sales-entry'] }),
+        queryClient.invalidateQueries({ queryKey: ['monthly-analytics'] }),
+        queryClient.invalidateQueries({ queryKey: ['calendar-analytics'] }),
+        router.invalidate(),
+      ])
+    },
+  })
+
+  const form = useForm({
+    defaultValues: createSalesFormValues(
+      salesEntryData.existingRecord,
+      salesEntryData.date,
+    ),
+    onSubmitMeta: { mode: 'submit' as SalesPersistMode },
+    onSubmit: async ({ value, meta }) => {
+      await saveSalesMutation.mutateAsync({ mode: meta.mode, value })
+    },
+  })
 
   useEffect(() => {
-    let isCancelled = false
-
-    void getSalesRecord(date).then((record) => {
-      if (isCancelled) {
-        return
-      }
-
-      setAmounts(createAmountInputs(record))
-      setNotes(record?.note ?? '')
-      setFeedbackMessage(
-        record
-          ? record.status === 'draft'
-            ? '已加载该日期的营业额草稿。'
-            : '已加载该日期的已提交营业额。'
-          : null,
-      )
-    })
-
-    return () => {
-      isCancelled = true
-    }
-  }, [date])
-
-  const handleAmountChange = (channelId: string, value: string) => {
-    if (value === '' || /^\d*\.?\d*$/.test(value)) {
-      setAmounts((previous) => ({ ...previous, [channelId]: value }))
-    }
-  }
-
-  const persistSales = async (mode: 'draft' | 'submit') => {
-    setIsPersisting(true)
-
-    try {
-      const payload = {
-        date,
-        amounts: {
-          bbva: amounts.bbva ?? '',
-          caixa: amounts.caixa ?? '',
-          efectivo: amounts.efectivo ?? '',
-        },
-        notes,
-      }
-
-      const savedRecord =
-        mode === 'draft'
-          ? await saveSalesDraft(payload)
-          : await submitSalesEntry(payload)
-
-      setAmounts(createAmountInputs(savedRecord))
-      setNotes(savedRecord.note)
-      setFeedbackMessage(mode === 'draft' ? '营业额草稿已保存。' : '今日营业额已提交。')
-    } finally {
-      setIsPersisting(false)
-    }
-  }
+    form.reset(createSalesFormValues(salesEntryData.existingRecord, salesEntryData.date))
+    setFeedbackMessage(
+      salesEntryData.existingRecord
+        ? salesEntryData.existingRecord.status === 'draft'
+          ? '已加载该日期的营业额草稿。'
+          : '已加载该日期的已提交营业额。'
+        : null,
+    )
+  }, [form, salesEntryData.date, salesEntryData.existingRecord])
 
   return (
     <AppShell>
@@ -105,6 +98,13 @@ function SalesEntryPage() {
         </div>
 
         <div className="mx-auto max-w-xl">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              void form.handleSubmit({ mode: 'submit' })
+            }}
+          >
           <Card className="mb-6 rounded-xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-2 text-base">
@@ -113,11 +113,19 @@ function SalesEntryPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <Input
-                type="date"
-                value={date}
-                onChange={(event) => setDate(event.target.value)}
-                className="rounded-lg"
+              <form.Field
+                name="businessDate"
+                children={(field) => (
+                  <Input
+                    type="date"
+                    value={field.state.value}
+                    onChange={(event) => {
+                      field.handleChange(event.target.value)
+                      setBusinessDate(event.target.value)
+                    }}
+                    className="rounded-lg"
+                  />
+                )}
               />
             </CardContent>
           </Card>
@@ -135,14 +143,24 @@ function SalesEntryPage() {
                   </Label>
                   <div className="relative">
                     <Euro className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                    <Input
-                      id={channel.id}
-                      type="text"
-                      inputMode="decimal"
-                      placeholder="0.00"
-                      value={amounts[channel.id]}
-                      onChange={(event) => handleAmountChange(channel.id, event.target.value)}
-                      className="rounded-lg pl-10 text-right text-lg font-medium"
+                    <form.Field
+                      name={channel.id}
+                      children={(field) => (
+                        <Input
+                          id={channel.id}
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="0.00"
+                          value={field.state.value}
+                          onChange={(event) => {
+                            const nextValue = event.target.value
+                            if (isDecimalInput(nextValue)) {
+                              field.handleChange(nextValue)
+                            }
+                          }}
+                          className="rounded-lg pl-10 text-right text-lg font-medium"
+                        />
+                      )}
                     />
                   </div>
                 </div>
@@ -151,7 +169,12 @@ function SalesEntryPage() {
               <div className="mt-6 rounded-xl bg-secondary p-4">
                 <div className="flex items-center justify-between">
                   <span className="font-medium text-muted-foreground">总计</span>
-                  <span className="text-2xl font-bold">€{total.toFixed(2)}</span>
+                  <form.Subscribe
+                    selector={(state) => getSalesTotal(state.values)}
+                    children={(total) => (
+                      <span className="text-2xl font-bold">€{total.toFixed(2)}</span>
+                    )}
+                  />
                 </div>
               </div>
             </CardContent>
@@ -162,11 +185,16 @@ function SalesEntryPage() {
               <CardTitle className="text-base">备注（可选）</CardTitle>
             </CardHeader>
             <CardContent>
-              <Textarea
-                placeholder="添加备注信息..."
-                value={notes}
-                onChange={(event) => setNotes(event.target.value)}
-                className="min-h-[100px] resize-none rounded-lg"
+              <form.Field
+                name="notes"
+                children={(field) => (
+                  <Textarea
+                    placeholder="添加备注信息..."
+                    value={field.state.value}
+                    onChange={(event) => field.handleChange(event.target.value)}
+                    className="min-h-[100px] resize-none rounded-lg"
+                  />
+                )}
               />
             </CardContent>
           </Card>
@@ -179,27 +207,39 @@ function SalesEntryPage() {
 
           <div className="flex gap-3">
             <Button
+              type="button"
               variant="secondary"
               className="flex-1 rounded-lg"
-              disabled={isPersisting}
-              onClick={() => void persistSales('draft')}
+              disabled={saveSalesMutation.isPending}
+              onClick={() => void form.handleSubmit({ mode: 'draft' })}
             >
               <Save className="mr-2 h-4 w-4" />
               保存草稿
             </Button>
             <Button
+              type="submit"
               className="flex-1 rounded-lg"
-              disabled={isPersisting}
-              onClick={() => void persistSales('submit')}
+              disabled={saveSalesMutation.isPending}
             >
               <CheckCircle className="mr-2 h-4 w-4" />
               确认提交
             </Button>
           </div>
+          </form>
         </div>
       </div>
     </AppShell>
   )
+}
+
+type SalesPersistMode = 'draft' | 'submit'
+
+interface SalesFormValues {
+  businessDate: string
+  bbva: string
+  caixa: string
+  efectivo: string
+  notes: string
 }
 
 function createAmountInputs(record: SalesDailyRecord | null) {
@@ -216,6 +256,44 @@ function createAmountInputs(record: SalesDailyRecord | null) {
     caixa: formatAmountInput(record.caixaAmount),
     efectivo: formatAmountInput(record.cashAmount),
   }
+}
+
+function createSalesFormValues(
+  record: SalesDailyRecord | null,
+  businessDate: string,
+): SalesFormValues {
+  const amounts = createAmountInputs(record)
+
+  return {
+    businessDate,
+    bbva: amounts.bbva,
+    caixa: amounts.caixa,
+    efectivo: amounts.efectivo,
+    notes: record?.note ?? '',
+  }
+}
+
+function getSalesTotal(values: SalesFormValues) {
+  return [values.bbva, values.caixa, values.efectivo].reduce((sum, value) => {
+    const amount = Number.parseFloat(value) || 0
+    return sum + amount
+  }, 0)
+}
+
+function toSalesPayload(values: SalesFormValues): SalesDailyDraftInput {
+  return {
+    date: values.businessDate,
+    amounts: {
+      bbva: values.bbva,
+      caixa: values.caixa,
+      efectivo: values.efectivo,
+    },
+    notes: values.notes,
+  }
+}
+
+function isDecimalInput(value: string) {
+  return value === '' || /^\d*\.?\d*$/.test(value)
 }
 
 function formatAmountInput(value: number) {

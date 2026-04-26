@@ -1,5 +1,6 @@
-import { useEffect, useState, type ChangeEvent } from 'react'
-import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
+import { useState, type ChangeEvent } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link, createFileRoute, useNavigate, useRouter } from '@tanstack/react-router'
 import { ArrowLeft, Camera, FileImage, Upload } from 'lucide-react'
 
 import { AppShell } from '@/components/app-shell'
@@ -25,7 +26,6 @@ import {
   getInvoiceStatusLabel,
   listInvoiceJobs,
 } from '@/lib/server/queries/invoices'
-import type { InvoiceReviewJob } from '@/lib/server/app-domain'
 import { createInvoiceIntakeJob } from '@/lib/server/mutations/invoices'
 
 export const Route = createFileRoute('/invoices/new')({
@@ -35,26 +35,34 @@ export const Route = createFileRoute('/invoices/new')({
 
 function InvoiceIntakePage() {
   const navigate = useNavigate()
+  const router = useRouter()
+  const queryClient = useQueryClient()
   const loaderData = Route.useLoaderData()
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [fileErrorMessage, setFileErrorMessage] = useState<string | null>(null)
-  const [recentJobs, setRecentJobs] = useState<InvoiceReviewJob[]>(loaderData)
+  const recentJobsQuery = useQuery({
+    queryKey: ['invoice-jobs'],
+    queryFn: listInvoiceJobs,
+    initialData: loaderData,
+  })
+  const recentJobs = recentJobsQuery.data ?? []
+  const createJobMutation = useMutation({
+    mutationFn: (fileName: string) => createInvoiceIntakeJob(fileName),
+    onSuccess: async (nextJob) => {
+      setFileErrorMessage(null)
+      setSelectedFile(null)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['invoice-jobs'] }),
+        queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] }),
+        router.invalidate(),
+      ])
 
-  useEffect(() => {
-    let isCancelled = false
-
-    setRecentJobs(loaderData)
-
-    void listInvoiceJobs().then((nextJobs) => {
-      if (!isCancelled) {
-        setRecentJobs(nextJobs)
-      }
-    })
-
-    return () => {
-      isCancelled = true
-    }
-  }, [loaderData])
+      void navigate({
+        to: '/invoices/review/$jobId',
+        params: { jobId: nextJob.jobId },
+      })
+    },
+  })
 
   const handleCreateJob = async () => {
     if (!selectedFile) {
@@ -67,15 +75,7 @@ function InvoiceIntakePage() {
       return
     }
 
-    const nextJob = await createInvoiceIntakeJob(selectedFile.name)
-    setFileErrorMessage(null)
-    setRecentJobs(await listInvoiceJobs())
-    setSelectedFile(null)
-
-    void navigate({
-      to: '/invoices/review/$jobId',
-      params: { jobId: nextJob.jobId },
-    })
+    createJobMutation.mutate(selectedFile.name)
   }
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -113,12 +113,11 @@ function InvoiceIntakePage() {
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-bold">发票 intake</h1>
             <Badge variant="secondary" className="rounded-lg">
-              Phase 5 本地版
+              真实 intake
             </Badge>
           </div>
           <p className="mt-1 text-muted-foreground">
-            当前页面只负责选择文件、创建 intake job，并跳转到指定任务的 review
-            工作台。
+                当前页面只负责选择文件、创建 intake job，并跳转到指定任务的 review 工作台。
           </p>
         </div>
 
@@ -130,7 +129,7 @@ function InvoiceIntakePage() {
                 上传发票
               </CardTitle>
               <CardDescription>
-                当前通过 query/mutation 边界管理 intake job，后续可直接切换到真实 D1。
+                上传成功后会创建 intake job，并进入独立 review 工作台。
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -144,8 +143,7 @@ function InvoiceIntakePage() {
                   </Label>
                   <p className="mt-2 text-sm text-muted-foreground">
                     支持 PDF 或常见图片格式，单文件不超过{' '}
-                    {formatInvoiceUploadLimit(MAX_INVOICE_UPLOAD_SIZE_BYTES)}，当前仅模拟创建
-                    intake job。
+                    {formatInvoiceUploadLimit(MAX_INVOICE_UPLOAD_SIZE_BYTES)}。
                   </p>
                   <Input
                     id="invoice-file"
@@ -181,7 +179,7 @@ function InvoiceIntakePage() {
               <div className="flex flex-col gap-3 sm:flex-row">
                 <Button
                   className="flex-1 rounded-lg"
-                  disabled={!selectedFile}
+                  disabled={!selectedFile || createJobMutation.isPending}
                   onClick={() => void handleCreateJob()}
                 >
                   <Camera className="mr-2 h-4 w-4" />

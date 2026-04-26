@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { ArrowLeft, ChevronLeft, ChevronRight } from 'lucide-react'
 
@@ -6,7 +7,6 @@ import { AppShell } from '@/components/app-shell'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
-import type { CalendarAnalyticsSummary } from '@/lib/server/app-domain'
 import { getCalendarAnalyticsSummary } from '@/lib/server/queries/analytics'
 
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日']
@@ -19,22 +19,11 @@ export const Route = createFileRoute('/analytics/calendar')({
 function AnalyticsCalendarPage() {
   const loaderData = Route.useLoaderData()
   const [selectedMonth, setSelectedMonth] = useState(loaderData.selectedMonth)
-  const [calendarSummary, setCalendarSummary] =
-    useState<CalendarAnalyticsSummary>(loaderData)
-
-  useEffect(() => {
-    let isCancelled = false
-
-    void getCalendarAnalyticsSummary(selectedMonth).then((nextSummary) => {
-      if (!isCancelled) {
-        setCalendarSummary(nextSummary)
-      }
-    })
-
-    return () => {
-      isCancelled = true
-    }
-  }, [selectedMonth])
+  const { data: calendarSummary = loaderData } = useQuery({
+    queryKey: ['calendar-analytics', selectedMonth],
+    queryFn: () => getCalendarAnalyticsSummary(selectedMonth),
+    initialData: selectedMonth === loaderData.selectedMonth ? loaderData : undefined,
+  })
 
   const currentDate = toMonthDate(selectedMonth)
   const year = currentDate.getFullYear()

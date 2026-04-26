@@ -375,33 +375,33 @@ Expected: Root Route 能正确加载 `globals.css`，构建时不再报 Next 专
 - Create: `src/lib/server/queue.ts`
 - Create: `src/lib/server/extraction.ts`
 
-- [ ] **Step 1: 在 `wrangler.jsonc` 中补全 bindings**
+- [x] **Step 1: 在 `wrangler.jsonc` 中补全 bindings**
   - `DB`
   - `RAW_DOCUMENTS`
   - `INTAKE_QUEUE`
   - `AI`
 
-- [ ] **Step 2: 建立 `bindings.ts`**
+- [x] **Step 2: 建立 `bindings.ts`**
   - 统一声明运行时会使用到的 Cloudflare bindings
   - 避免每个 server 文件重复写类型
 
-- [ ] **Step 3: 建立 `upload.ts`**
+- [x] **Step 3: 建立 `upload.ts`**
   - 文件上传顺序固定为：写 R2 -> 记 `source_documents` -> 记 `intake_jobs` -> 发 Queue
 
-- [ ] **Step 4: 建立 `queue.ts`**
+- [x] **Step 4: 建立 `queue.ts`**
   - 统一封装 enqueue 逻辑
   - 让 route 和 mutation 不直接拼 queue payload
 
-- [ ] **Step 5: 建立 `extraction.ts`**
+- [x] **Step 5: 建立 `extraction.ts`**
   - 把“文档规范化”“结构化字段抽取”从 route 层移走
   - 不在这里直接完成最终入账
 
-- [ ] **Step 6: 扩展 `src/server.ts` queue handler**
+- [x] **Step 6: 扩展 `src/server.ts` queue handler**
   - 遍历 batch messages
   - 调用 extraction 流程
   - 更新 intake job 状态
 
-- [ ] **Step 7: 验证链路顺序**
+- [x] **Step 7: 验证链路顺序**
   - 不允许跳过 `source_documents`
   - 不允许上传后直接伪造 review 数据进入页面
 
@@ -421,33 +421,33 @@ Expected: Root Route 能正确加载 `globals.css`，构建时不再报 Next 专
 - Modify: `src/routes/analytics/monthly.tsx`
 - Modify: `src/routes/analytics/calendar.tsx`
 
-- [ ] **Step 1: 首页改成 loader + Query 混合模式**
+- [x] **Step 1: 首页改成 loader + Query 混合模式**
   - 首屏摘要走 loader
   - 提交后需要刷新的数据走 Query 失效
 
-- [ ] **Step 2: `sales/new` 改成 TanStack Form**
+- [x] **Step 2: `sales/new` 改成 TanStack Form**
   - 字段至少包含 `businessDate`、`bbva`、`caixa`、`efectivo`、`notes`
   - 提交成功后回写首页 summary
 
-- [ ] **Step 3: `invoices/new` 改成真实上传页**
+- [x] **Step 3: `invoices/new` 改成真实上传页**
   - 上传成功后拿到 `jobId`
   - 自动跳转到 `/invoices/review/$jobId`
 
-- [ ] **Step 4: `invoices/review/$jobId` 改成 Query + Form + Table**
+- [x] **Step 4: `invoices/review/$jobId` 改成 Query + Form + Table**
   - header 字段编辑走 Form
   - line items 展示与编辑走 Table
   - 保存 / 确认走 mutation
 
-- [ ] **Step 5: 分析页改接真实聚合**
+- [x] **Step 5: 分析页改接真实聚合**
   - 月收入结构
   - 月支出结构
   - 周趋势
 
-- [ ] **Step 6: 日历页改接真实聚合**
+- [x] **Step 6: 日历页改接真实聚合**
   - 删除 `Math.random()`
   - 删除仅用于演示的假数据生成函数
 
-- [ ] **Step 7: 清理 mock 常量**
+- [x] **Step 7: 清理 mock 常量**
   - 删除 `incomeData`
   - 删除 `expenseData`
   - 删除 `weeklyData`
