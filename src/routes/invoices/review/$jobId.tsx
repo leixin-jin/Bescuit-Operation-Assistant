@@ -16,18 +16,42 @@ import type {
   InvoiceReviewJob,
 } from '@/lib/server/app-domain'
 import {
+  getInvoiceJobStage,
+  isInvoiceJobProcessing,
+} from '@/lib/server/app-domain'
+import {
   confirmInvoiceReviewJob,
   saveInvoiceReviewJob,
 } from '@/lib/server/mutations/invoices'
+import {
+  confirmInvoiceReviewJobServerFn,
+  saveInvoiceReviewJobServerFn,
+} from '@/lib/server/mutations/invoices.rpc'
 import {
   formatInvoiceTimestamp,
   getInvoiceReadinessSummary,
   getInvoiceReviewPageData,
   getInvoiceStatusLabel,
 } from '@/lib/server/queries/invoices'
+import {
+  getInvoicePipelineEnabled,
+  getInvoiceReviewPageDataServerFn,
+} from '@/lib/server/queries/invoices.rpc'
 
 export const Route = createFileRoute('/invoices/review/$jobId')({
-  loader: ({ params }) => getInvoiceReviewPageData(params.jobId),
+  loader: async ({ params }) => {
+    const pipelineEnabled = await getInvoicePipelineEnabled()
+    const pageData = pipelineEnabled
+      ? await getInvoiceReviewPageDataServerFn({
+          data: { jobId: params.jobId },
+        })
+      : await getInvoiceReviewPageData(params.jobId)
+
+    return {
+      pipelineEnabled,
+      ...pageData,
+    }
+  },
   component: InvoiceReviewWorkbenchPage,
 })
 
@@ -36,25 +60,43 @@ function InvoiceReviewWorkbenchPage() {
   const queryClient = useQueryClient()
   const { jobId } = Route.useParams()
   const loaderData = Route.useLoaderData()
+  const { pipelineEnabled } = loaderData
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null)
   const [zoom, setZoom] = useState(100)
   const [rotation, setRotation] = useState(0)
   const [currentPage, setCurrentPage] = useState(1)
 
   const reviewQuery = useQuery({
-    queryKey: ['invoice-review', jobId],
-    queryFn: () => getInvoiceReviewPageData(jobId),
+    queryKey: ['invoice-review', jobId, pipelineEnabled],
+    queryFn: async () => {
+      const pageData = pipelineEnabled
+        ? await getInvoiceReviewPageDataServerFn({ data: { jobId } })
+        : await getInvoiceReviewPageData(jobId)
+
+      return {
+        pipelineEnabled,
+        ...pageData,
+      }
+    },
     initialData: loaderData.job?.jobId === jobId ? loaderData : undefined,
+    refetchInterval: (query) => {
+      const job = query.state.data?.job
+      return pipelineEnabled && job && isInvoiceJobProcessing(job) ? 2000 : false
+    },
   })
   const pageData = reviewQuery.data ?? loaderData
   const activeJob = pageData.job?.jobId === jobId ? pageData.job : null
+  const activeJobStage = activeJob ? getInvoiceJobStage(activeJob) : null
+  const isPipelineJobProcessing = Boolean(
+    pipelineEnabled && activeJob && isInvoiceJobProcessing(activeJob),
+  )
   const isRehydratingJob = !activeJob && reviewQuery.isFetching
 
   const form = useForm({
     defaultValues: createInvoiceReviewFormValues(activeJob),
     onSubmitMeta: { mode: 'draft' as ReviewPersistMode },
     onSubmit: async ({ value, meta }) => {
-      if (!activeJob) {
+      if (!activeJob || isPipelineJobProcessing) {
         return
       }
 
@@ -76,7 +118,10 @@ function InvoiceReviewWorkbenchPage() {
       const reviewJob = mergeReviewFormValues(activeJob, value)
 
       if (mode === 'draft') {
-        const savedJob = await saveInvoiceReviewJob(reviewJob)
+        const savedJob = pipelineEnabled
+          ? await saveInvoiceReviewJobServerFn({ data: { job: reviewJob } })
+          : await saveInvoiceReviewJob(reviewJob)
+
         return {
           mode,
           ok: true,
@@ -84,7 +129,10 @@ function InvoiceReviewWorkbenchPage() {
         }
       }
 
-      const result = await confirmInvoiceReviewJob(reviewJob)
+      const result = pipelineEnabled
+        ? await confirmInvoiceReviewJobServerFn({ data: { job: reviewJob } })
+        : await confirmInvoiceReviewJob(reviewJob)
+
       return {
         mode,
         ok: result.ok,
@@ -108,6 +156,11 @@ function InvoiceReviewWorkbenchPage() {
         queryClient.invalidateQueries({ queryKey: ['calendar-analytics'] }),
         router.invalidate(),
       ])
+    },
+    onError: (error) => {
+      setFeedbackMessage(
+        error instanceof Error ? error.message : '保存发票 review 失败。',
+      )
     },
   })
 
@@ -144,7 +197,7 @@ function InvoiceReviewWorkbenchPage() {
       <AppShell>
         <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center px-6">
           <div className="rounded-xl border bg-background px-6 py-5 text-sm text-muted-foreground">
-            正在读取当前浏览器会话中的发票任务…
+            正在读取当前浏览器会话中的发票任务...
           </div>
         </div>
       </AppShell>
@@ -215,7 +268,23 @@ function InvoiceReviewWorkbenchPage() {
                       </p>
                     </div>
 
-                    {readinessSummary.isReady ? (
+                    {editableJob.status === 'error' ? (
+                      <Badge
+                        variant="secondary"
+                        className="gap-1.5 rounded-lg bg-rose-100 text-rose-700"
+                      >
+                        <AlertCircle className="h-3.5 w-3.5" />
+                        抽取失败，等待处理
+                      </Badge>
+                    ) : isPipelineJobProcessing ? (
+                      <Badge
+                        variant="secondary"
+                        className="gap-1.5 rounded-lg bg-sky-100 text-sky-700"
+                      >
+                        <AlertCircle className="h-3.5 w-3.5" />
+                        {activeJobStage === 'queued' ? 'Queue 排队中' : '异步抽取中'}
+                      </Badge>
+                    ) : readinessSummary.isReady ? (
                       <Badge
                         variant="secondary"
                         className="gap-1.5 rounded-lg bg-emerald-100 text-emerald-700"
@@ -263,11 +332,13 @@ function InvoiceReviewWorkbenchPage() {
                     <div className="flex-1 space-y-6 overflow-auto p-6">
                       <ReviewHeaderForm
                         header={editableJob.header}
+                        disabled={isPipelineJobProcessing}
                         onFieldChange={handleHeaderFieldChange}
                       />
                       <ReviewTable
                         lineItems={editableJob.lineItems}
                         ingredientOptions={pageData.ingredientOptions}
+                        disabled={isPipelineJobProcessing}
                         onQuantityChange={(itemId, value) => {
                           if (isDecimalInput(value)) {
                             handleLineItemFieldChange(itemId, value, 'qty')
@@ -288,6 +359,29 @@ function InvoiceReviewWorkbenchPage() {
                       {feedbackMessage ? (
                         <div className="mb-4 rounded-xl border bg-secondary/50 px-4 py-3 text-sm text-muted-foreground">
                           {feedbackMessage}
+                        </div>
+                      ) : null}
+                      {isPipelineJobProcessing ? (
+                        <div className="mb-4 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-700">
+                          <p className="font-medium text-sky-800">正在异步处理文档</p>
+                          <p className="mt-2">
+                            当前阶段：
+                            {activeJobStage === 'queued'
+                              ? 'Queue 排队中'
+                              : activeJobStage === 'extracting'
+                                ? 'OCR / 结构化抽取中'
+                                : '处理中'}
+                            。页面会自动刷新，抽取完成后再开放编辑。
+                          </p>
+                        </div>
+                      ) : null}
+                      {editableJob.status === 'error' ? (
+                        <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+                          <p className="font-medium text-rose-800">异步抽取失败</p>
+                          <p className="mt-2">
+                            {editableJob.errorMessage?.trim() ||
+                              '系统未返回更详细的错误信息。'}
+                          </p>
                         </div>
                       ) : null}
                       {readinessSummary.isReady ? null : (
@@ -320,7 +414,9 @@ function InvoiceReviewWorkbenchPage() {
                           type="button"
                           variant="secondary"
                           className="flex-1 rounded-lg"
-                          disabled={persistReviewMutation.isPending}
+                          disabled={
+                            persistReviewMutation.isPending || isPipelineJobProcessing
+                          }
                           onClick={() => void form.handleSubmit({ mode: 'draft' })}
                         >
                           <Save className="mr-2 h-4 w-4" />
@@ -329,7 +425,11 @@ function InvoiceReviewWorkbenchPage() {
                         <Button
                           type="submit"
                           className="flex-1 rounded-lg"
-                          disabled={!readinessSummary.isReady || persistReviewMutation.isPending}
+                          disabled={
+                            !readinessSummary.isReady ||
+                            persistReviewMutation.isPending ||
+                            isPipelineJobProcessing
+                          }
                         >
                           <CheckCircle className="mr-2 h-4 w-4" />
                           确认入账

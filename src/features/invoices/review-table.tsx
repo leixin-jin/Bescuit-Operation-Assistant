@@ -33,6 +33,7 @@ import type {
 interface ReviewTableProps {
   lineItems: InvoiceLineItemDraft[]
   ingredientOptions: IngredientOption[]
+  disabled?: boolean
   onQuantityChange: (itemId: string, value: string) => void
   onUnitPriceChange: (itemId: string, value: string) => void
   onIngredientChange: (itemId: string, value: string) => void
@@ -41,6 +42,7 @@ interface ReviewTableProps {
 export function ReviewTable({
   lineItems,
   ingredientOptions,
+  disabled = false,
   onQuantityChange,
   onUnitPriceChange,
   onIngredientChange,
@@ -71,6 +73,7 @@ export function ReviewTable({
         cell: ({ row }) => (
           <div className="flex items-center justify-end gap-2">
             <Input
+              disabled={disabled}
               value={row.original.qty}
               onChange={(event) => onQuantityChange(row.original.id, event.target.value)}
               className="h-8 w-20 rounded-lg text-right"
@@ -86,6 +89,7 @@ export function ReviewTable({
           <div className="flex items-center justify-end gap-2">
             <span className="text-xs text-muted-foreground">€</span>
             <Input
+              disabled={disabled}
               value={row.original.unitPrice}
               onChange={(event) => onUnitPriceChange(row.original.id, event.target.value)}
               className="h-8 w-24 rounded-lg text-right"
@@ -113,6 +117,7 @@ export function ReviewTable({
         header: '原料映射',
         cell: ({ row }) => (
           <Select
+            disabled={disabled}
             value={row.original.ingredient}
             onValueChange={(value) => onIngredientChange(row.original.id, value)}
           >
@@ -130,7 +135,13 @@ export function ReviewTable({
         ),
       }),
     ]
-  }, [ingredientOptions, onIngredientChange, onQuantityChange, onUnitPriceChange])
+  }, [
+    disabled,
+    ingredientOptions,
+    onIngredientChange,
+    onQuantityChange,
+    onUnitPriceChange,
+  ])
   const table = useReactTable({
     data: lineItems,
     columns,

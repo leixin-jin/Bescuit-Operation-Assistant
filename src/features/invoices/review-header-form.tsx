@@ -6,11 +6,13 @@ import type { InvoiceHeaderDraft } from '@/lib/server/app-domain'
 
 interface ReviewHeaderFormProps {
   header: InvoiceHeaderDraft
+  disabled?: boolean
   onFieldChange: (field: keyof InvoiceHeaderDraft, value: string) => void
 }
 
 export function ReviewHeaderForm({
   header,
+  disabled = false,
   onFieldChange,
 }: ReviewHeaderFormProps) {
   return (
@@ -24,6 +26,7 @@ export function ReviewHeaderForm({
             <Label htmlFor="supplier">供应商</Label>
             <Input
               id="supplier"
+              disabled={disabled}
               value={header.supplier}
               onChange={(event) => onFieldChange('supplier', event.target.value)}
               className="rounded-lg"
@@ -33,6 +36,7 @@ export function ReviewHeaderForm({
             <Label htmlFor="invoiceNo">发票号</Label>
             <Input
               id="invoiceNo"
+              disabled={disabled}
               value={header.invoiceNo}
               onChange={(event) => onFieldChange('invoiceNo', event.target.value)}
               className="rounded-lg"
@@ -46,6 +50,7 @@ export function ReviewHeaderForm({
             <Input
               id="date"
               type="date"
+              disabled={disabled}
               value={header.date}
               onChange={(event) => onFieldChange('date', event.target.value)}
               className="rounded-lg"
@@ -55,6 +60,7 @@ export function ReviewHeaderForm({
             <Label htmlFor="totalAmount">总金额 (€)</Label>
             <Input
               id="totalAmount"
+              disabled={disabled}
               value={header.totalAmount}
               inputMode="decimal"
               onChange={(event) => onFieldChange('totalAmount', event.target.value)}
@@ -65,6 +71,7 @@ export function ReviewHeaderForm({
             <Label htmlFor="taxAmount">税额 (€)</Label>
             <Input
               id="taxAmount"
+              disabled={disabled}
               value={header.taxAmount}
               inputMode="decimal"
               onChange={(event) => onFieldChange('taxAmount', event.target.value)}
@@ -77,6 +84,7 @@ export function ReviewHeaderForm({
           <Label htmlFor="notes">备注</Label>
           <Textarea
             id="notes"
+            disabled={disabled}
             value={header.notes}
             onChange={(event) => onFieldChange('notes', event.target.value)}
             className="min-h-24 resize-none rounded-lg"

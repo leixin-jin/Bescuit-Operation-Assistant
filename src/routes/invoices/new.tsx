@@ -21,15 +21,30 @@ import {
   MAX_INVOICE_UPLOAD_SIZE_BYTES,
   validateInvoiceUpload,
 } from '@/features/invoices/intake-file-validation'
+import { createInvoiceIntakeJob } from '@/lib/server/mutations/invoices'
+import { uploadInvoiceIntakeDocument } from '@/lib/server/mutations/invoices.rpc'
 import {
   formatInvoiceTimestamp,
   getInvoiceStatusLabel,
   listInvoiceJobs,
 } from '@/lib/server/queries/invoices'
-import { createInvoiceIntakeJob } from '@/lib/server/mutations/invoices'
+import {
+  getInvoicePipelineEnabled,
+  listInvoiceJobsServerFn,
+} from '@/lib/server/queries/invoices.rpc'
 
 export const Route = createFileRoute('/invoices/new')({
-  loader: () => listInvoiceJobs(),
+  loader: async () => {
+    const pipelineEnabled = await getInvoicePipelineEnabled()
+    const recentJobs = pipelineEnabled
+      ? await listInvoiceJobsServerFn()
+      : await listInvoiceJobs()
+
+    return {
+      pipelineEnabled,
+      recentJobs,
+    }
+  },
   component: InvoiceIntakePage,
 })
 
@@ -38,16 +53,25 @@ function InvoiceIntakePage() {
   const router = useRouter()
   const queryClient = useQueryClient()
   const loaderData = Route.useLoaderData()
+  const { pipelineEnabled } = loaderData
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [fileErrorMessage, setFileErrorMessage] = useState<string | null>(null)
+
   const recentJobsQuery = useQuery({
-    queryKey: ['invoice-jobs'],
-    queryFn: listInvoiceJobs,
-    initialData: loaderData,
+    queryKey: ['invoice-jobs', pipelineEnabled],
+    queryFn: () =>
+      pipelineEnabled ? listInvoiceJobsServerFn() : listInvoiceJobs(),
+    initialData: loaderData.recentJobs,
   })
   const recentJobs = recentJobsQuery.data ?? []
+
   const createJobMutation = useMutation({
-    mutationFn: (fileName: string) => createInvoiceIntakeJob(fileName),
+    mutationFn: (file: File) =>
+      pipelineEnabled
+        ? uploadInvoiceIntakeDocument({
+            data: createUploadFormData(file),
+          })
+        : createInvoiceIntakeJob(file.name),
     onSuccess: async (nextJob) => {
       setFileErrorMessage(null)
       setSelectedFile(null)
@@ -62,10 +86,15 @@ function InvoiceIntakePage() {
         params: { jobId: nextJob.jobId },
       })
     },
+    onError: (error) => {
+      setFileErrorMessage(
+        error instanceof Error ? error.message : '创建 intake 任务失败。',
+      )
+    },
   })
 
   const handleCreateJob = async () => {
-    if (!selectedFile) {
+    if (!selectedFile || createJobMutation.isPending) {
       return
     }
 
@@ -75,7 +104,7 @@ function InvoiceIntakePage() {
       return
     }
 
-    createJobMutation.mutate(selectedFile.name)
+    createJobMutation.mutate(selectedFile)
   }
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -113,11 +142,13 @@ function InvoiceIntakePage() {
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-bold">发票 intake</h1>
             <Badge variant="secondary" className="rounded-lg">
-              真实 intake
+              {pipelineEnabled ? 'Phase 6 异步链路' : 'Phase 5 本地版'}
             </Badge>
           </div>
           <p className="mt-1 text-muted-foreground">
-                当前页面只负责选择文件、创建 intake job，并跳转到指定任务的 review 工作台。
+            {pipelineEnabled
+              ? '当前页面会把文件写入 R2、登记 source document、创建 intake job，并投递到 Queue。'
+              : '当前页面只负责选择文件、创建 intake job，并跳转到指定任务的 review 工作台。'}
           </p>
         </div>
 
@@ -129,7 +160,9 @@ function InvoiceIntakePage() {
                 上传发票
               </CardTitle>
               <CardDescription>
-                上传成功后会创建 intake job，并进入独立 review 工作台。
+                {pipelineEnabled
+                  ? '上传顺序固定为 R2 -> source_documents -> intake_jobs -> Queue。'
+                  : '当前通过 query/mutation 边界管理 intake job，后续可直接切换到真实 D1。'}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -143,7 +176,10 @@ function InvoiceIntakePage() {
                   </Label>
                   <p className="mt-2 text-sm text-muted-foreground">
                     支持 PDF 或常见图片格式，单文件不超过{' '}
-                    {formatInvoiceUploadLimit(MAX_INVOICE_UPLOAD_SIZE_BYTES)}。
+                    {formatInvoiceUploadLimit(MAX_INVOICE_UPLOAD_SIZE_BYTES)}，
+                    {pipelineEnabled
+                      ? '上传后会自动进入异步抽取链路。'
+                      : '当前仅模拟创建 intake job。'}
                   </p>
                   <Input
                     id="invoice-file"
@@ -183,7 +219,7 @@ function InvoiceIntakePage() {
                   onClick={() => void handleCreateJob()}
                 >
                   <Camera className="mr-2 h-4 w-4" />
-                  创建 intake 任务
+                  {createJobMutation.isPending ? '创建中...' : '创建 intake 任务'}
                 </Button>
                 <Button variant="secondary" className="flex-1 rounded-lg" asChild>
                   <Link
@@ -247,4 +283,10 @@ function formatFileSize(fileSize: number) {
   }
 
   return `${Math.max(1, Math.round(fileSize / 1024))} KB`
+}
+
+function createUploadFormData(file: File) {
+  const formData = new FormData()
+  formData.set('file', file)
+  return formData
 }
