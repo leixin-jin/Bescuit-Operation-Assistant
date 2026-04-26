@@ -84,6 +84,8 @@ export function createStoredInvoiceJob(fileName: string) {
     uploadedAt: new Date().toISOString(),
     pageCount: 1,
     status: 'uploaded',
+    stage: 'uploaded',
+    errorMessage: null,
     header: {
       supplier: '',
       invoiceNo: '',
@@ -349,6 +351,8 @@ function getSeedInvoiceJobs(): InvoiceReviewJob[] {
       uploadedAt: '2026-04-18T09:20:00.000Z',
       pageCount: 2,
       status: 'needs_review',
+      stage: 'needs_review',
+      errorMessage: null,
       header: {
         supplier: 'Metro Cash & Carry',
         invoiceNo: 'INV-2026-001234',
@@ -402,6 +406,8 @@ function getSeedInvoiceJobs(): InvoiceReviewJob[] {
       uploadedAt: '2026-04-16T13:45:00.000Z',
       pageCount: 3,
       status: 'ready',
+      stage: 'ready',
+      errorMessage: null,
       header: {
         supplier: 'Makro Madrid',
         invoiceNo: 'MK-889120',
@@ -437,6 +443,8 @@ function getSeedInvoiceJobs(): InvoiceReviewJob[] {
       uploadedAt: '2026-04-09T08:12:00.000Z',
       pageCount: 1,
       status: 'ready',
+      stage: 'ready',
+      errorMessage: null,
       header: {
         supplier: 'Bodega Local',
         invoiceNo: 'BD-240409',
@@ -479,10 +487,14 @@ function normalizeInvoiceJob(job: InvoiceReviewJob): InvoiceReviewJob {
     header: job.header,
     lineItems,
   })
+  const stage = normalizeInvoiceJobStage(job)
+  const status = normalizeInvoiceJobStatus(stage, readinessSummary.isReady)
 
   return {
     ...job,
-    status: readinessSummary.isReady ? 'ready' : 'needs_review',
+    status,
+    stage,
+    errorMessage: stage === 'error' ? job.errorMessage ?? null : null,
     lineItems,
   }
 }
@@ -610,6 +622,10 @@ function isInvoiceReviewJob(value: unknown): value is InvoiceReviewJob {
     typeof value.uploadedAt === 'string' &&
     typeof value.pageCount === 'number' &&
     isInvoiceJobStatus(value.status) &&
+    (typeof value.stage === 'undefined' || isInvoiceJobStage(value.stage)) &&
+    (typeof value.errorMessage === 'undefined' ||
+      value.errorMessage === null ||
+      typeof value.errorMessage === 'string') &&
     isInvoiceHeaderDraft(value.header) &&
     Array.isArray(value.lineItems) &&
     value.lineItems.every(isInvoiceLineItemDraft)
@@ -617,7 +633,23 @@ function isInvoiceReviewJob(value: unknown): value is InvoiceReviewJob {
 }
 
 function isInvoiceJobStatus(value: unknown): value is InvoiceJobStatus {
-  return value === 'uploaded' || value === 'needs_review' || value === 'ready'
+  return (
+    value === 'uploaded' ||
+    value === 'needs_review' ||
+    value === 'ready' ||
+    value === 'error'
+  )
+}
+
+function isInvoiceJobStage(value: unknown) {
+  return (
+    value === 'uploaded' ||
+    value === 'queued' ||
+    value === 'extracting' ||
+    value === 'needs_review' ||
+    value === 'ready' ||
+    value === 'error'
+  )
 }
 
 function isInvoiceHeaderDraft(value: unknown): value is InvoiceHeaderDraft {
@@ -653,6 +685,35 @@ function isInvoiceLineItemDraft(value: unknown): value is InvoiceLineItemDraft {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function normalizeInvoiceJobStage(job: InvoiceReviewJob) {
+  if (job.stage && isInvoiceJobStage(job.stage)) {
+    return job.stage
+  }
+
+  switch (job.status) {
+    case 'ready':
+      return 'ready'
+    case 'error':
+      return 'error'
+    case 'needs_review':
+      return 'needs_review'
+    default:
+      return 'uploaded'
+  }
+}
+
+function normalizeInvoiceJobStatus(stage: string, isReady: boolean): InvoiceJobStatus {
+  if (stage === 'error') {
+    return 'error'
+  }
+
+  if (stage === 'queued' || stage === 'extracting') {
+    return 'uploaded'
+  }
+
+  return isReady ? 'ready' : 'needs_review'
 }
 
 type RequiredInvoiceHeaderField = Exclude<keyof InvoiceHeaderDraft, 'notes'>

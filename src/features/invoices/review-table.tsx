@@ -26,6 +26,7 @@ import type {
 interface ReviewTableProps {
   lineItems: InvoiceLineItemDraft[]
   ingredientOptions: IngredientOption[]
+  disabled?: boolean
   onQuantityChange: (itemId: string, value: string) => void
   onUnitPriceChange: (itemId: string, value: string) => void
   onIngredientChange: (itemId: string, value: string) => void
@@ -34,6 +35,7 @@ interface ReviewTableProps {
 export function ReviewTable({
   lineItems,
   ingredientOptions,
+  disabled = false,
   onQuantityChange,
   onUnitPriceChange,
   onIngredientChange,
@@ -83,6 +85,7 @@ export function ReviewTable({
                       <TableCell>
                         <div className="flex items-center justify-end gap-2">
                           <Input
+                            disabled={disabled}
                             value={item.qty}
                             onChange={(event) =>
                               onQuantityChange(item.id, event.target.value)
@@ -96,6 +99,7 @@ export function ReviewTable({
                         <div className="flex items-center justify-end gap-2">
                           <span className="text-xs text-muted-foreground">€</span>
                           <Input
+                            disabled={disabled}
                             value={item.unitPrice}
                             onChange={(event) =>
                               onUnitPriceChange(item.id, event.target.value)
@@ -109,6 +113,7 @@ export function ReviewTable({
                       </TableCell>
                       <TableCell>
                         <Select
+                          disabled={disabled}
                           value={item.ingredient}
                           onValueChange={(value) => onIngredientChange(item.id, value)}
                         >

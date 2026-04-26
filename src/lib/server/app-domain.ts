@@ -26,7 +26,15 @@ export interface SalesDailyDraftInput {
   notes: string
 }
 
-export type InvoiceJobStatus = 'uploaded' | 'needs_review' | 'ready'
+export type InvoiceJobStatus = 'uploaded' | 'needs_review' | 'ready' | 'error'
+
+export type InvoiceIntakeStage =
+  | 'uploaded'
+  | 'queued'
+  | 'extracting'
+  | 'needs_review'
+  | 'ready'
+  | 'error'
 
 export interface InvoiceHeaderDraft {
   supplier: string
@@ -58,6 +66,8 @@ export interface InvoiceReviewJob {
   uploadedAt: string
   pageCount: number
   status: InvoiceJobStatus
+  stage?: InvoiceIntakeStage
+  errorMessage?: string | null
   header: InvoiceHeaderDraft
   lineItems: InvoiceLineItemDraft[]
 }
@@ -157,9 +167,37 @@ export function getInvoiceStatusLabel(status: InvoiceJobStatus) {
   switch (status) {
     case 'uploaded':
       return '已创建'
+    case 'error':
+      return '处理失败'
     case 'ready':
       return '可入账'
     default:
       return '待核对'
   }
+}
+
+export function getInvoiceJobStage(
+  job: Pick<InvoiceReviewJob, 'stage' | 'status'>,
+): InvoiceIntakeStage {
+  if (job.stage) {
+    return job.stage
+  }
+
+  switch (job.status) {
+    case 'ready':
+      return 'ready'
+    case 'error':
+      return 'error'
+    case 'needs_review':
+      return 'needs_review'
+    default:
+      return 'uploaded'
+  }
+}
+
+export function isInvoiceJobProcessing(
+  job: Pick<InvoiceReviewJob, 'stage' | 'status'>,
+) {
+  const stage = getInvoiceJobStage(job)
+  return stage === 'queued' || stage === 'extracting'
 }

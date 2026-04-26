@@ -27,25 +27,46 @@ import {
 } from '@/lib/server/queries/invoices'
 import type { InvoiceReviewJob } from '@/lib/server/app-domain'
 import { createInvoiceIntakeJob } from '@/lib/server/mutations/invoices'
+import {
+  getInvoicePipelineEnabled,
+  listInvoiceJobsServerFn,
+} from '@/lib/server/queries/invoices.rpc'
+import { uploadInvoiceIntakeDocument } from '@/lib/server/mutations/invoices.rpc'
 
 export const Route = createFileRoute('/invoices/new')({
-  loader: () => listInvoiceJobs(),
+  loader: async () => {
+    const pipelineEnabled = await getInvoicePipelineEnabled()
+    const recentJobs = pipelineEnabled
+      ? await listInvoiceJobsServerFn()
+      : await listInvoiceJobs()
+
+    return {
+      pipelineEnabled,
+      recentJobs,
+    }
+  },
   component: InvoiceIntakePage,
 })
 
 function InvoiceIntakePage() {
   const navigate = useNavigate()
   const loaderData = Route.useLoaderData()
+  const { pipelineEnabled } = loaderData
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [fileErrorMessage, setFileErrorMessage] = useState<string | null>(null)
-  const [recentJobs, setRecentJobs] = useState<InvoiceReviewJob[]>(loaderData)
+  const [isCreatingJob, setIsCreatingJob] = useState(false)
+  const [recentJobs, setRecentJobs] = useState<InvoiceReviewJob[]>(
+    loaderData.recentJobs,
+  )
 
   useEffect(() => {
     let isCancelled = false
 
-    setRecentJobs(loaderData)
+    setRecentJobs(loaderData.recentJobs)
 
-    void listInvoiceJobs().then((nextJobs) => {
+    const loadJobs = pipelineEnabled ? listInvoiceJobsServerFn : listInvoiceJobs
+
+    void loadJobs().then((nextJobs) => {
       if (!isCancelled) {
         setRecentJobs(nextJobs)
       }
@@ -54,10 +75,10 @@ function InvoiceIntakePage() {
     return () => {
       isCancelled = true
     }
-  }, [loaderData])
+  }, [loaderData.recentJobs, pipelineEnabled])
 
   const handleCreateJob = async () => {
-    if (!selectedFile) {
+    if (!selectedFile || isCreatingJob) {
       return
     }
 
@@ -67,15 +88,32 @@ function InvoiceIntakePage() {
       return
     }
 
-    const nextJob = await createInvoiceIntakeJob(selectedFile.name)
-    setFileErrorMessage(null)
-    setRecentJobs(await listInvoiceJobs())
-    setSelectedFile(null)
+    setIsCreatingJob(true)
 
-    void navigate({
-      to: '/invoices/review/$jobId',
-      params: { jobId: nextJob.jobId },
-    })
+    try {
+      const nextJob = pipelineEnabled
+        ? await uploadInvoiceIntakeDocument({
+            data: createUploadFormData(selectedFile),
+          })
+        : await createInvoiceIntakeJob(selectedFile.name)
+
+      setFileErrorMessage(null)
+      setRecentJobs(
+        pipelineEnabled ? await listInvoiceJobsServerFn() : await listInvoiceJobs(),
+      )
+      setSelectedFile(null)
+
+      void navigate({
+        to: '/invoices/review/$jobId',
+        params: { jobId: nextJob.jobId },
+      })
+    } catch (error) {
+      setFileErrorMessage(
+        error instanceof Error ? error.message : '创建 intake 任务失败。',
+      )
+    } finally {
+      setIsCreatingJob(false)
+    }
   }
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -113,12 +151,13 @@ function InvoiceIntakePage() {
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-bold">发票 intake</h1>
             <Badge variant="secondary" className="rounded-lg">
-              Phase 5 本地版
+              {pipelineEnabled ? 'Phase 6 异步链路' : 'Phase 5 本地版'}
             </Badge>
           </div>
           <p className="mt-1 text-muted-foreground">
-            当前页面只负责选择文件、创建 intake job，并跳转到指定任务的 review
-            工作台。
+            {pipelineEnabled
+              ? '当前页面会把文件写入 R2、登记 source document、创建 intake job，并投递到 Queue。'
+              : '当前页面只负责选择文件、创建 intake job，并跳转到指定任务的 review 工作台。'}
           </p>
         </div>
 
@@ -130,7 +169,9 @@ function InvoiceIntakePage() {
                 上传发票
               </CardTitle>
               <CardDescription>
-                当前通过 query/mutation 边界管理 intake job，后续可直接切换到真实 D1。
+                {pipelineEnabled
+                  ? '上传顺序固定为 R2 -> source_documents -> intake_jobs -> Queue。'
+                  : '当前通过 query/mutation 边界管理 intake job，后续可直接切换到真实 D1。'}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -144,8 +185,10 @@ function InvoiceIntakePage() {
                   </Label>
                   <p className="mt-2 text-sm text-muted-foreground">
                     支持 PDF 或常见图片格式，单文件不超过{' '}
-                    {formatInvoiceUploadLimit(MAX_INVOICE_UPLOAD_SIZE_BYTES)}，当前仅模拟创建
-                    intake job。
+                    {formatInvoiceUploadLimit(MAX_INVOICE_UPLOAD_SIZE_BYTES)}，
+                    {pipelineEnabled
+                      ? '上传后会自动进入异步抽取链路。'
+                      : '当前仅模拟创建 intake job。'}
                   </p>
                   <Input
                     id="invoice-file"
@@ -181,11 +224,11 @@ function InvoiceIntakePage() {
               <div className="flex flex-col gap-3 sm:flex-row">
                 <Button
                   className="flex-1 rounded-lg"
-                  disabled={!selectedFile}
+                  disabled={!selectedFile || isCreatingJob}
                   onClick={() => void handleCreateJob()}
                 >
                   <Camera className="mr-2 h-4 w-4" />
-                  创建 intake 任务
+                  {isCreatingJob ? '创建中…' : '创建 intake 任务'}
                 </Button>
                 <Button variant="secondary" className="flex-1 rounded-lg" asChild>
                   <Link
@@ -249,4 +292,10 @@ function formatFileSize(fileSize: number) {
   }
 
   return `${Math.max(1, Math.round(fileSize / 1024))} KB`
+}
+
+function createUploadFormData(file: File) {
+  const formData = new FormData()
+  formData.set('file', file)
+  return formData
 }
