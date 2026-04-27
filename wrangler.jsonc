@@ -11,7 +11,7 @@
     {
       "binding": "DB",
       "database_name": "bescuit-operation-assistant-db",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_id": "a0a74b5e-9815-49a7-b7f2-6d0c3d98449f"
     }
   ],
   "r2_buckets": [
@@ -24,12 +24,15 @@
     "producers": [
       {
         "binding": "INTAKE_QUEUE",
-        "queue": "bescuit-operation-assistant-intake-queue"
+        "queue": "bescuit-operation-assistant-intake"
       }
     ],
     "consumers": [
       {
-        "queue": "bescuit-operation-assistant-intake-queue"
+        "queue": "bescuit-operation-assistant-intake",
+        "max_retries": 3,
+        "retry_delay": 60,
+        "dead_letter_queue": "bescuit-operation-assistant-intake-dlq"
       }
     ]
   },

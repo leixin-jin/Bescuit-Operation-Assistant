@@ -10,7 +10,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "smoke": "vitest run src/tests/router.smoke.test.tsx src/tests/sales-boundary.test.ts src/tests/invoice-intake-rehydration.test.tsx src/tests/invoice-review-rehydration.test.tsx",
     "deploy": "pnpm run build && wrangler deploy",
+    "cf:migrate:remote": "wrangler d1 execute bescuit-operation-assistant-db --remote --file migrations/0001_initial.sql",
     "cf-typegen": "wrangler types src/lib/env.d.ts"
   },
   "dependencies": {
