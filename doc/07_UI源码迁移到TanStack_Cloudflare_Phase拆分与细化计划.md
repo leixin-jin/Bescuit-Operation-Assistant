@@ -469,7 +469,7 @@ Expected: Root Route 能正确加载 `globals.css`，构建时不再报 Next 专
 - Modify: `wrangler.jsonc`
 - Reference: `doc/UI源码/`
 
-- [ ] **Step 1: 跑构建与类型生成**
+- [x] **Step 1: 跑构建与类型生成**
 
 ```bash
 cd "/Users/zhuyuxia/Documents/GitHub/Bescuit-Operation-Assistant"
@@ -479,7 +479,7 @@ pnpm cf-typegen
 
 Expected: 构建通过，bindings 类型生成成功。
 
-- [ ] **Step 2: 创建 Cloudflare 资源**
+- [x] **Step 2: 创建 Cloudflare 资源**
 
 ```bash
 pnpm wrangler d1 create bescuit-operation-assistant-db
@@ -490,16 +490,28 @@ pnpm wrangler queues create bescuit-operation-assistant-intake-dlq
 
 Expected: 获得真实 `database_id` 和资源名，并回填 `wrangler.jsonc`。
 
-- [ ] **Step 3: 做 4 条最小 smoke test**
+Status 2026-04-26:
+- D1 已创建并回填：`a0a74b5e-9815-49a7-b7f2-6d0c3d98449f`
+- D1 已执行 `migrations/0001_initial.sql`
+- R2 bucket 已创建：`bescuit-operation-assistant-raw-documents`
+- Queue 已创建：`bescuit-operation-assistant-intake`
+- Queue DLQ 已创建：`bescuit-operation-assistant-intake-dlq`
+
+- [x] **Step 3: 做 4 条最小 smoke test**
   - 首页能展示 summary
   - 营业额录入后首页状态能刷新
   - 上传票据后能创建 intake job 并进入 review 页
   - 月分析和日历页不再显示随机数据
 
-- [ ] **Step 4: 补充仓库文档**
+Status 2026-04-26:
+- `pnpm smoke` 通过
+- `pnpm test` 通过
+- `rg "Math\\.random|incomeData|expenseData|weeklyData|mockLineItems|generateMockData" src` 未发现分析页/日历页随机 mock；仅剩 sidebar skeleton 宽度随机
+
+- [x] **Step 4: 补充仓库文档**
   - `README.md` 写清本地开发、构建、部署和 Cloudflare 资源依赖
 
-- [ ] **Step 5: 处理 `doc/UI源码` 的最终状态**
+- [x] **Step 5: 处理 `doc/UI源码` 的最终状态**
   - 如果仍需参考，则保留原目录
   - 如果迁移已完全稳定，可追加归档说明，但不要直接删除
 
