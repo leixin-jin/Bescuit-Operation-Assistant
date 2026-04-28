@@ -1,5 +1,11 @@
-import type { InvoiceReviewJob } from '@/lib/server/app-domain'
-import { createStoredInvoiceJob, getInvoiceReadinessSummary, upsertStoredInvoiceJob } from '@/lib/server/fallback-store'
+import {
+  getInvoiceReadinessSummary,
+  type InvoiceReviewJob,
+} from '@/lib/server/app-domain'
+import {
+  createStoredInvoiceJob,
+  upsertStoredInvoiceJob,
+} from '@/lib/server/demo-data'
 
 export async function createInvoiceIntakeJob(fileName: string) {
   return createStoredInvoiceJob(fileName)

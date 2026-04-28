@@ -3,21 +3,32 @@ import { createServerFn } from '@tanstack/react-start'
 
 import { getDb } from '@/lib/db/client'
 import { extractionResults, intakeJobs, sourceDocuments } from '@/lib/db/schema'
-import { ingredientOptions, type InvoiceReviewJob } from '@/lib/server/app-domain'
+import type { InvoiceReviewJob } from '@/lib/server/app-domain'
 import {
   buildInvoiceReviewJob,
   createPendingExtractionDraft,
   serializeExtractionDraft,
 } from '@/lib/server/extraction'
-import type { AppBindings } from '@/lib/server/bindings'
+import { getServerEnv, type AppBindings } from '@/lib/server/bindings'
 import { hasInvoiceIntakePipelineSchema } from '@/lib/server/pipeline-readiness'
+import { listIngredientOptions } from '@/lib/server/queries/ingredients'
+import { assertDemoDataEnabled } from '@/lib/server/runtime-config'
 
 export const getInvoicePipelineEnabled = createServerFn({ method: 'GET' }).handler(
-  async ({ context }) => hasInvoiceIntakePipelineSchema(context.env),
+  async ({ context }) => {
+    const env = getServerEnv(context)
+    const pipelineEnabled = await hasInvoiceIntakePipelineSchema(env)
+
+    if (!pipelineEnabled) {
+      assertDemoDataEnabled(env, 'invoice intake pipeline')
+    }
+
+    return pipelineEnabled
+  },
 )
 
 export const listInvoiceJobsServerFn = createServerFn({ method: 'GET' }).handler(
-  async ({ context }) => listInvoiceJobsFromDatabase(context.env),
+  async ({ context }) => listInvoiceJobsFromDatabase(getServerEnv(context)),
 )
 
 export const getInvoiceReviewPageDataServerFn = createServerFn({
@@ -25,15 +36,18 @@ export const getInvoiceReviewPageDataServerFn = createServerFn({
 })
   .inputValidator((data: { jobId: string }) => data)
   .handler(async ({ data, context }) => {
-    const job = await getInvoiceJobFromDatabase(context.env, data.jobId)
+    const env = getServerEnv(context)
+    const job = await getInvoiceJobFromDatabase(env, data.jobId)
 
     return {
       job,
-      ingredientOptions,
+      ingredientOptions: await listIngredientOptions(env),
     }
   })
 
-async function listInvoiceJobsFromDatabase(env: AppBindings) {
+async function listInvoiceJobsFromDatabase(
+  env: Partial<AppBindings> | null | undefined,
+) {
   const db = getDb(env)
 
   if (!db) {
@@ -75,7 +89,10 @@ async function listInvoiceJobsFromDatabase(env: AppBindings) {
   )
 }
 
-async function getInvoiceJobFromDatabase(env: AppBindings, jobId: string) {
+async function getInvoiceJobFromDatabase(
+  env: Partial<AppBindings> | null | undefined,
+  jobId: string,
+) {
   const db = getDb(env)
 
   if (!db) {

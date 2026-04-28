@@ -11,12 +11,14 @@ import {
 
 export default {
   fetch(request: Request, env: AppBindings, ctx: ExecutionContext) {
-    return handler.fetch(request, {
+    const handlerOptions = {
       context: {
         env,
         ctx,
       },
-    })
+    } as unknown as Parameters<typeof handler.fetch>[1]
+
+    return handler.fetch(request, handlerOptions)
   },
   async queue(
     batch: MessageBatch<InvoiceIntakeQueueMessage>,

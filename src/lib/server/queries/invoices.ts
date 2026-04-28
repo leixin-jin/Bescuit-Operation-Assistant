@@ -1,16 +1,21 @@
 import {
   formatInvoiceTimestamp,
+  getInvoiceReadinessSummary,
   getInvoiceStatusLabel,
-  ingredientOptions,
 } from '@/lib/server/app-domain'
-import { getInvoiceReadinessSummary, getStoredInvoiceJob, listStoredInvoiceJobs } from '@/lib/server/fallback-store'
+import {
+  demoIngredientOptions,
+  getStoredInvoiceJob,
+  listStoredInvoiceJobs,
+} from '@/lib/server/demo-data'
 
 export {
   formatInvoiceTimestamp,
   getInvoiceReadinessSummary,
   getInvoiceStatusLabel,
-  ingredientOptions,
 }
+
+export const ingredientOptions = demoIngredientOptions
 
 export async function getInvoiceIntakePageData() {
   return {
@@ -29,6 +34,6 @@ export async function getInvoiceJob(jobId: string) {
 export async function getInvoiceReviewPageData(jobId: string) {
   return {
     job: getStoredInvoiceJob(jobId) ?? null,
-    ingredientOptions,
+    ingredientOptions: demoIngredientOptions,
   }
 }

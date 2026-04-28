@@ -10,25 +10,35 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import type { SalesDailyDraftInput, SalesDailyRecord } from '@/lib/server/app-domain'
-import { getSalesEntryPageData } from '@/lib/server/queries/sales'
-import { saveSalesDraft, submitSalesEntry } from '@/lib/server/mutations/sales'
+import {
+  getMadridTodayInputValue,
+  paymentChannels,
+  type SalesDailyDraftInput,
+  type SalesDailyRecord,
+} from '@/lib/server/app-domain'
+import { getSalesEntryPageDataServerFn } from '@/lib/server/queries/sales'
+import {
+  saveSalesDraftServerFn,
+  submitSalesEntryServerFn,
+} from '@/lib/server/mutations/sales'
 
 export const Route = createFileRoute('/sales/new')({
-  loader: () => getSalesEntryPageData(),
+  loader: () => getSalesEntryPageDataServerFn({ data: {} }),
   component: SalesEntryPage,
 })
 
 function SalesEntryPage() {
   const router = useRouter()
   const queryClient = useQueryClient()
-  const loaderData = Route.useLoaderData()
+  const loaderData = Route.useLoaderData() ?? createSalesEntryPageFallbackData()
   const [businessDate, setBusinessDate] = useState(loaderData.date)
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null)
 
   const salesEntryQuery = useQuery({
     queryKey: ['sales-entry', businessDate],
-    queryFn: () => getSalesEntryPageData(businessDate),
+    queryFn: async () =>
+      (await getSalesEntryPageDataServerFn({ data: { date: businessDate } })) ??
+      createSalesEntryPageFallbackData(businessDate),
     initialData: businessDate === loaderData.date ? loaderData : undefined,
   })
   const salesEntryData = salesEntryQuery.data ?? loaderData
@@ -42,7 +52,9 @@ function SalesEntryPage() {
       value: SalesFormValues
     }) => {
       const payload = toSalesPayload(value)
-      return mode === 'draft' ? saveSalesDraft(payload) : submitSalesEntry(payload)
+      return mode === 'draft'
+        ? saveSalesDraftServerFn({ data: payload })
+        : submitSalesEntryServerFn({ data: payload })
     },
     onSuccess: async (savedRecord, variables) => {
       form.reset(createSalesFormValues(savedRecord, savedRecord.date))
@@ -230,6 +242,14 @@ function SalesEntryPage() {
       </div>
     </AppShell>
   )
+}
+
+function createSalesEntryPageFallbackData(date = getMadridTodayInputValue()) {
+  return {
+    date,
+    paymentChannels,
+    existingRecord: null,
+  }
 }
 
 type SalesPersistMode = 'draft' | 'submit'

@@ -11,10 +11,11 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import { getDashboardSummary } from '@/lib/server/queries/dashboard'
+import type { DashboardSummary } from '@/lib/server/app-domain'
+import { getDashboardSummaryServerFn } from '@/lib/server/queries/dashboard'
 
 export const Route = createFileRoute('/')({
-  loader: () => getDashboardSummary(),
+  loader: () => getDashboardSummaryServerFn({ data: {} }),
   component: HomePage,
 })
 
@@ -22,9 +23,12 @@ function HomePage() {
   const dashboardSummary = Route.useLoaderData()
   const { data: summary } = useQuery({
     queryKey: ['dashboard-summary'],
-    queryFn: getDashboardSummary,
+    queryFn: async () =>
+      (await getDashboardSummaryServerFn({ data: {} })) ??
+      createDashboardSummaryFallback(),
     initialData: dashboardSummary,
   })
+  const visibleSummary = summary ?? dashboardSummary ?? createDashboardSummaryFallback()
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
@@ -39,7 +43,7 @@ function HomePage() {
               <p className="text-sm text-muted-foreground">Bar Operations Assistant</p>
             </div>
           </div>
-          <p className="text-sm text-muted-foreground">{summary.todayLabel}</p>
+          <p className="text-sm text-muted-foreground">{visibleSummary.todayLabel}</p>
         </div>
       </header>
 
@@ -113,22 +117,41 @@ function HomePage() {
         <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-center gap-4">
           <Badge variant="secondary" className="gap-1.5 rounded-lg px-3 py-1.5">
             <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-            <span>{summary.salesRecordedToday ? '今日营业额已录入' : '今日营业额待录入'}</span>
+            <span>
+              {visibleSummary.salesRecordedToday ? '今日营业额已录入' : '今日营业额待录入'}
+            </span>
           </Badge>
           <Badge variant="secondary" className="gap-1.5 rounded-lg px-3 py-1.5">
             <Clock className="h-3.5 w-3.5" />
-            <span>最近操作: {summary.lastActivityLabel}</span>
+            <span>最近操作: {visibleSummary.lastActivityLabel}</span>
           </Badge>
           <Badge variant="secondary" className="gap-1.5 rounded-lg px-3 py-1.5">
             <span className="text-muted-foreground">本月已录入</span>
-            <span className="font-semibold">{summary.monthlyInvoiceCount} 张发票</span>
+            <span className="font-semibold">{visibleSummary.monthlyInvoiceCount} 张发票</span>
           </Badge>
           <Badge variant="secondary" className="gap-1.5 rounded-lg px-3 py-1.5">
             <span className="text-muted-foreground">待核对发票</span>
-            <span className="font-semibold">{summary.pendingInvoiceCount} 张</span>
+            <span className="font-semibold">{visibleSummary.pendingInvoiceCount} 张</span>
           </Badge>
         </div>
       </footer>
     </div>
   )
+}
+
+function createDashboardSummaryFallback(): DashboardSummary {
+  return {
+    todayLabel: new Intl.DateTimeFormat('zh-CN', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      weekday: 'long',
+      timeZone: 'Europe/Madrid',
+    }).format(new Date()),
+    salesRecordedToday: false,
+    pendingInvoiceCount: 0,
+    monthlyInvoiceCount: 0,
+    monthlyExpenseTotal: 0,
+    lastActivityLabel: '尚无操作记录',
+  }
 }

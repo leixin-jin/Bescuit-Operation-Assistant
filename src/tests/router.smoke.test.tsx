@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
 import { describe, expect, test, vi } from 'vitest'
 
+import { createInvoiceJob } from '@/features/invoices/mock-store'
 import { routeTree } from '@/routeTree.gen'
 
 vi.mock('@/styles/globals.css?url', () => ({
@@ -83,7 +84,9 @@ describe('phase 1-4 smoke tests', () => {
   })
 
   test('invoice review workbench renders the split preview and review sections', async () => {
-    await renderRoute('/invoices/review/demo-metro-apr')
+    const job = await createInvoiceJob('smoke-upload.pdf')
+
+    await renderRoute(`/invoices/review/${job.jobId}`)
 
     expect(await screen.findByRole('heading', { name: '发票 review 工作台' })).toBeTruthy()
     expect(screen.getByText('文档预览')).toBeTruthy()
