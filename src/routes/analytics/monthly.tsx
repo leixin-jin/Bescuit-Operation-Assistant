@@ -19,20 +19,27 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import type { MonthlyAnalyticsSummary } from '@/lib/server/app-domain'
-import { getMonthlyAnalyticsSummary } from '@/lib/server/queries/analytics'
+import {
+  getMadridTodayInputValue,
+  getMonthOptions,
+  type MonthlyAnalyticsSummary,
+} from '@/lib/server/app-domain'
+import { getMonthlyAnalyticsSummaryServerFn } from '@/lib/server/queries/analytics'
 
 export const Route = createFileRoute('/analytics/monthly')({
-  loader: () => getMonthlyAnalyticsSummary(),
+  loader: () => getMonthlyAnalyticsSummaryServerFn({ data: {} }),
   component: AnalyticsMonthlyPage,
 })
 
 function AnalyticsMonthlyPage() {
-  const loaderData = Route.useLoaderData()
+  const loaderData = Route.useLoaderData() ?? createMonthlySummaryFallback()
   const [selectedMonth, setSelectedMonth] = useState(loaderData.selectedMonth)
   const { data: analyticsSummary = loaderData } = useQuery({
     queryKey: ['monthly-analytics', selectedMonth],
-    queryFn: () => getMonthlyAnalyticsSummary(selectedMonth),
+    queryFn: async () =>
+      (await getMonthlyAnalyticsSummaryServerFn({
+        data: { month: selectedMonth },
+      })) ?? createMonthlySummaryFallback(selectedMonth),
     initialData: selectedMonth === loaderData.selectedMonth ? loaderData : undefined,
   })
 
@@ -227,6 +234,30 @@ function AnalyticsMonthlyPage() {
       </div>
     </AppShell>
   )
+}
+
+function createMonthlySummaryFallback(
+  selectedMonth = getMadridTodayInputValue().slice(0, 7),
+): MonthlyAnalyticsSummary {
+  return {
+    selectedMonth,
+    monthOptions: getMonthOptions(selectedMonth),
+    incomeBreakdown: [
+      { name: 'BBVA', value: 0, percentage: 0 },
+      { name: 'CAIXA', value: 0, percentage: 0 },
+      { name: 'EFECTIVO', value: 0, percentage: 0 },
+    ],
+    expenseBreakdown: [],
+    weeklyTrend: [],
+    totalIncome: 0,
+    totalExpense: 0,
+    totalNet: 0,
+    profitMargin: 0,
+    incomeTrend: 0,
+    expenseTrend: 0,
+    netTrend: 0,
+    marginDelta: 0,
+  }
 }
 
 function renderDonutSegments(

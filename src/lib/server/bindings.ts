@@ -3,6 +3,10 @@ export interface AppBindings {
   RAW_DOCUMENTS?: R2Bucket
   INTAKE_QUEUE?: Queue<unknown>
   AI?: Ai
+  ENABLE_DEMO_DATA?: string
+  VITE_ENABLE_DEMO_DATA?: string
+  MODE?: string
+  NODE_ENV?: string
 }
 
 export interface StartRequestContext {
@@ -43,4 +47,8 @@ export function requireBinding<T>(
   }
 
   return binding
+}
+
+export function getServerEnv(context: unknown) {
+  return (context as { env?: AppBindings } | null | undefined)?.env
 }

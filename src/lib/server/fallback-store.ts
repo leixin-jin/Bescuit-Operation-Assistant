@@ -3,24 +3,24 @@ import type {
   InvoiceHeaderDraft,
   InvoiceJobStatus,
   InvoiceLineItemDraft,
-  InvoiceReadinessSummary,
   InvoiceReviewJob,
   SalesDailyDraftInput,
   SalesDailyRecord,
   SalesRecordStatus,
 } from '@/lib/server/app-domain'
-import { getMadridTodayInputValue } from '@/lib/server/app-domain'
+import {
+  getInvoiceReadinessSummary,
+  getMadridTodayInputValue,
+  getMonthOptions,
+  normalizeSalesDraftInput,
+  parseCurrencyAmount,
+  roundCurrency,
+} from '@/lib/server/app-domain'
 
 const SALES_STORAGE_KEY = 'bescuit-operation-assistant:sales-daily'
 const INVOICE_SESSION_STORAGE_KEY = 'bescuit-operation-assistant:invoice-jobs'
 
-const requiredInvoiceHeaderFieldLabels = {
-  supplier: '供应商',
-  invoiceNo: '发票号',
-  date: '发票日期',
-  totalAmount: '总金额',
-  taxAmount: '税额',
-} satisfies Record<RequiredInvoiceHeaderField, string>
+export { getInvoiceReadinessSummary, getMonthOptions }
 
 export function listStoredSalesRecords() {
   const persistedRecords = readSalesRecords()
@@ -50,7 +50,7 @@ export function upsertStoredSalesRecord(
   input: SalesDailyDraftInput,
   status: SalesRecordStatus,
 ) {
-  const nextRecord = normalizeSalesRecord(input, status)
+  const nextRecord = normalizeSalesDraftInput(input, status)
   const storedRecords = readSalesRecords().filter((record) => record.date !== input.date)
   storedRecords.push(nextRecord)
   persistSalesRecords(storedRecords)
@@ -131,42 +131,6 @@ export function upsertStoredInvoiceJob(job: InvoiceReviewJob) {
   return cloneInvoiceJob(normalizedJob)
 }
 
-export function getInvoiceReadinessSummary(
-  job: Pick<InvoiceReviewJob, 'header' | 'lineItems'>,
-): InvoiceReadinessSummary {
-  const missingHeaderFields = getMissingRequiredHeaderFields(job.header)
-  const invalidHeaderFields = getInvalidHeaderFields(job.header)
-  const unmatchedLineItems = job.lineItems.filter((item) => !item.matched).length
-
-  return {
-    isReady:
-      missingHeaderFields.length === 0 &&
-      invalidHeaderFields.length === 0 &&
-      unmatchedLineItems === 0,
-    missingHeaderFields,
-    invalidHeaderFields,
-    unmatchedLineItems,
-  }
-}
-
-export function getMonthOptions(referenceMonth = getMonthKey(getMadridTodayInputValue())) {
-  const [yearText, monthText] = referenceMonth.split('-')
-  const anchorYear = Number.parseInt(yearText, 10)
-  const anchorMonth = Number.parseInt(monthText, 10)
-
-  return Array.from({ length: 3 }, (_, index) => {
-    const date = new Date(anchorYear, anchorMonth - 1 - index, 1, 12)
-    const value = formatMonthKey(date)
-    return {
-      value,
-      label: date.toLocaleDateString('zh-CN', {
-        year: 'numeric',
-        month: 'long',
-      }),
-    }
-  })
-}
-
 export function getCalendarMonthBase(month: string) {
   const [year, monthNumber] = month.split('-').map((value) => Number.parseInt(value, 10))
   const daysInMonth = new Date(year, monthNumber, 0).getDate()
@@ -198,7 +162,7 @@ export function getApprovedInvoiceTotalsByDay(month: string) {
     const currentTotal = totals.get(job.header.date) ?? 0
     totals.set(
       job.header.date,
-      currentTotal + normalizeInvoiceAmount(job.header.totalAmount),
+      currentTotal + parseCurrencyAmount(job.header.totalAmount),
     )
   }
 
@@ -296,29 +260,8 @@ function canUseSessionStorage() {
   )
 }
 
-function normalizeSalesRecord(
-  input: SalesDailyDraftInput,
-  status: SalesRecordStatus,
-): SalesDailyRecord {
-  const bbvaAmount = normalizeDecimalString(input.amounts.bbva)
-  const caixaAmount = normalizeDecimalString(input.amounts.caixa)
-  const cashAmount = normalizeDecimalString(input.amounts.efectivo)
-
-  return {
-    id: `sales-${input.date}`,
-    date: input.date,
-    totalAmount: bbvaAmount + caixaAmount + cashAmount,
-    bbvaAmount,
-    caixaAmount,
-    cashAmount,
-    status,
-    note: input.notes.trim(),
-    updatedAt: new Date().toISOString(),
-  }
-}
-
 function getSeedSalesRecords(): SalesDailyRecord[] {
-  const month = getMonthKey(getMadridTodayInputValue())
+  const month = getMadridTodayInputValue().slice(0, 7)
   const baseCalendar = getCalendarMonthBase(month)
 
   return Object.entries(baseCalendar)
@@ -552,61 +495,6 @@ function toSalesDailyRecord(value: unknown): SalesDailyRecord | null {
   }
 }
 
-function normalizeDecimalString(value: string) {
-  const parsedValue = Number.parseFloat(value)
-  return Number.isFinite(parsedValue) ? roundCurrency(parsedValue) : 0
-}
-
-function normalizeInvoiceAmount(value: string) {
-  const normalizedValue = value.trim().replace(',', '.')
-  const parsedValue = Number.parseFloat(normalizedValue)
-  return Number.isFinite(parsedValue) ? roundCurrency(parsedValue) : 0
-}
-
-function roundCurrency(value: number) {
-  return Math.round(value * 100) / 100
-}
-
-function getMissingRequiredHeaderFields(header: InvoiceHeaderDraft) {
-  return typedEntries(requiredInvoiceHeaderFieldLabels)
-    .filter(([field]) => header[field].trim() === '')
-    .map(([, label]) => label)
-}
-
-function getInvalidHeaderFields(header: InvoiceHeaderDraft) {
-  const invalidFields: string[] = []
-
-  if (header.totalAmount.trim() !== '' && !isInvoiceAmount(header.totalAmount)) {
-    invalidFields.push('总金额')
-  }
-
-  if (header.taxAmount.trim() !== '' && !isInvoiceAmount(header.taxAmount)) {
-    invalidFields.push('税额')
-  }
-
-  return invalidFields
-}
-
-function isInvoiceAmount(value: string) {
-  const normalizedValue = value.trim().replace(',', '.')
-  return /^\d+(?:\.\d{1,2})?$/.test(normalizedValue)
-}
-
-function typedEntries<T extends Record<string, string>>(record: T) {
-  return Object.entries(record) as Array<[keyof T & string, T[keyof T & string]]>
-}
-
-function formatMonthKey(date: Date) {
-  return [
-    date.getFullYear().toString(),
-    String(date.getMonth() + 1).padStart(2, '0'),
-  ].join('-')
-}
-
-function getMonthKey(date: string) {
-  return date.slice(0, 7)
-}
-
 function isSalesRecordStatus(value: unknown): value is SalesRecordStatus {
   return value === 'draft' || value === 'submitted'
 }
@@ -715,5 +603,3 @@ function normalizeInvoiceJobStatus(stage: string, isReady: boolean): InvoiceJobS
 
   return isReady ? 'ready' : 'needs_review'
 }
-
-type RequiredInvoiceHeaderField = Exclude<keyof InvoiceHeaderDraft, 'notes'>

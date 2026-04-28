@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { index, sqliteTable, text, real } from 'drizzle-orm/sqlite-core'
+import { index, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 
 export const sourceDocuments = sqliteTable(
   'source_documents',
@@ -78,7 +78,7 @@ export const salesDaily = sqliteTable(
       .notNull()
       .default(sql`CURRENT_TIMESTAMP`),
   },
-  (table) => [index('sales_daily_date_idx').on(table.date)],
+  (table) => [uniqueIndex('sales_daily_date_unique_idx').on(table.date)],
 )
 
 export const ingredients = sqliteTable(
@@ -124,6 +124,7 @@ export const invoices = sqliteTable(
   (table) => [
     index('invoices_invoice_date_idx').on(table.invoiceDate),
     index('invoices_review_status_idx').on(table.reviewStatus),
+    uniqueIndex('invoices_intake_job_unique_idx').on(table.intakeJobId),
   ],
 )
 
@@ -170,6 +171,10 @@ export const ledgerEntries = sqliteTable(
   (table) => [
     index('ledger_entries_entry_date_idx').on(table.entryDate),
     index('ledger_entries_source_idx').on(table.sourceKind, table.sourceId),
+    uniqueIndex('ledger_entries_source_unique_idx').on(
+      table.sourceKind,
+      table.sourceId,
+    ),
   ],
 )
 

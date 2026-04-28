@@ -37,6 +37,7 @@ import {
   getInvoicePipelineEnabled,
   getInvoiceReviewPageDataServerFn,
 } from '@/lib/server/queries/invoices.rpc'
+import { getInvoiceDocumentPreviewServerFn } from '@/lib/server/queries/document-preview'
 
 export const Route = createFileRoute('/invoices/review/$jobId')({
   loader: async ({ params }) => {
@@ -87,6 +88,15 @@ function InvoiceReviewWorkbenchPage() {
   const pageData = reviewQuery.data ?? loaderData
   const activeJob = pageData.job?.jobId === jobId ? pageData.job : null
   const activeJobStage = activeJob ? getInvoiceJobStage(activeJob) : null
+  const documentPreviewQuery = useQuery({
+    queryKey: ['invoice-document-preview', jobId, pipelineEnabled],
+    queryFn: async () =>
+      pipelineEnabled
+        ? ((await getInvoiceDocumentPreviewServerFn({ data: { jobId } })) ?? null)
+        : null,
+    enabled: Boolean(pipelineEnabled && activeJob),
+    retry: false,
+  })
   const isPipelineJobProcessing = Boolean(
     pipelineEnabled && activeJob && isInvoiceJobProcessing(activeJob),
   )
@@ -325,6 +335,7 @@ function InvoiceReviewWorkbenchPage() {
                           Math.min(editableJob.pageCount, value + 1),
                         )
                       }
+                      preview={documentPreviewQuery.data ?? null}
                     />
                   </div>
 

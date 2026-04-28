@@ -413,6 +413,14 @@ Expected: Root Route 能正确加载 `globals.css`，构建时不再报 Next 专
 - 首页、营业额录入、发票 review、分析页、日历页均改接真实数据
 - route 中的 mock 常量和随机生成逻辑被删除
 
+Status 2026-04-27:
+- 已补齐生产 fallback 开关：生产环境未配置真实 D1/R2/Queue/schema 时不再静默回落到 demo/fallback 数据。
+- 首页 summary、营业额录入、月分析、日历页已接 D1 聚合；无真实数据时显示 0 或空状态。
+- 发票确认已写入 `invoices`、`invoice_items`、`ledger_entries`，重复确认通过稳定 id 覆盖同一入账记录。
+- review 原料选项已改为读取 `ingredients` 表；`migrations/0002_real_data_constraints_and_ingredients.sql` 提供初始原料 seed。
+- review 文档预览已通过 `source_documents.r2_key` 从 R2 读取图片/PDF；无 pipeline 或读取失败时保留 UI 占位。
+- `fallback-store` 只保留在显式 demo 模块和 dev/test mock 边界中。
+
 **Files:**
 - Modify: `src/routes/index.tsx`
 - Modify: `src/routes/sales/new.tsx`
@@ -462,6 +470,10 @@ Expected: Root Route 能正确加载 `globals.css`，构建时不再报 Next 专
 - 构建、类型生成、最小 smoke test 通过
 - Cloudflare 资源创建并填回配置
 - 原型目录进入只读参考状态
+
+Status 2026-04-27:
+- 代码侧新增真实数据切换后，需要在远端 D1 继续执行 `migrations/0002_real_data_constraints_and_ingredients.sql`。
+- Phase 8 的 2026-04-26 资源创建记录仍有效，但“真实数据切换完成”以 0002 migration、最新 test/build 验证和生产配置禁用 demo fallback 为准。
 
 **Files:**
 - Modify: `README.md`

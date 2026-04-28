@@ -60,7 +60,7 @@ CREATE TABLE `sales_daily` (
   FOREIGN KEY (`source_document_id`) REFERENCES `source_documents`(`id`)
 );
 
-CREATE INDEX `sales_daily_date_idx`
+CREATE UNIQUE INDEX `sales_daily_date_unique_idx`
   ON `sales_daily` (`date`);
 
 CREATE TABLE `ingredients` (
@@ -103,6 +103,9 @@ CREATE INDEX `invoices_invoice_date_idx`
 CREATE INDEX `invoices_review_status_idx`
   ON `invoices` (`review_status`);
 
+CREATE UNIQUE INDEX `invoices_intake_job_unique_idx`
+  ON `invoices` (`intake_job_id`);
+
 CREATE TABLE `invoice_items` (
   `id` text PRIMARY KEY NOT NULL,
   `invoice_id` text NOT NULL,
@@ -143,6 +146,9 @@ CREATE INDEX `ledger_entries_entry_date_idx`
   ON `ledger_entries` (`entry_date`);
 
 CREATE INDEX `ledger_entries_source_idx`
+  ON `ledger_entries` (`source_kind`, `source_id`);
+
+CREATE UNIQUE INDEX `ledger_entries_source_unique_idx`
   ON `ledger_entries` (`source_kind`, `source_id`);
 
 CREATE TABLE `ingredient_aliases` (

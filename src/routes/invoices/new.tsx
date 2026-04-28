@@ -65,13 +65,18 @@ function InvoiceIntakePage() {
   })
   const recentJobs = recentJobsQuery.data ?? []
 
-  const createJobMutation = useMutation({
-    mutationFn: (file: File) =>
-      pipelineEnabled
-        ? uploadInvoiceIntakeDocument({
+  const createJobMutation = useMutation<{ jobId: string }, Error, File>({
+    mutationFn: async (file: File) => {
+      const result = pipelineEnabled
+        ? await uploadInvoiceIntakeDocument({
             data: createUploadFormData(file),
           })
-        : createInvoiceIntakeJob(file.name),
+        : await createInvoiceIntakeJob(file.name)
+
+      return {
+        jobId: result.jobId,
+      }
+    },
     onSuccess: async (nextJob) => {
       setFileErrorMessage(null)
       setSelectedFile(null)
@@ -221,15 +226,22 @@ function InvoiceIntakePage() {
                   <Camera className="mr-2 h-4 w-4" />
                   {createJobMutation.isPending ? '创建中...' : '创建 intake 任务'}
                 </Button>
-                <Button variant="secondary" className="flex-1 rounded-lg" asChild>
-                  <Link
-                    to="/invoices/review/$jobId"
-                    params={{ jobId: recentJobs[0]?.jobId ?? 'demo-metro-apr' }}
-                  >
+                {recentJobs[0] ? (
+                  <Button variant="secondary" className="flex-1 rounded-lg" asChild>
+                    <Link
+                      to="/invoices/review/$jobId"
+                      params={{ jobId: recentJobs[0].jobId }}
+                    >
+                      <FileImage className="mr-2 h-4 w-4" />
+                      打开最近任务
+                    </Link>
+                  </Button>
+                ) : (
+                  <Button variant="secondary" className="flex-1 rounded-lg" disabled>
                     <FileImage className="mr-2 h-4 w-4" />
-                    打开最近任务
-                  </Link>
-                </Button>
+                    暂无最近任务
+                  </Button>
+                )}
               </div>
             </CardContent>
           </Card>
