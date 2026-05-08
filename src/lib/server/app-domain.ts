@@ -51,8 +51,20 @@ export interface InvoiceLineItemDraft {
   qty: string
   unit: string
   unitPrice: string
+  lineTotal?: string
+  taxRate?: string
   ingredient: string
   matched: boolean
+  confidence?: number
+  sourceText?: string
+}
+
+export interface InvoiceExtractionSummary {
+  provider: string
+  model: string
+  overallConfidence?: number
+  warnings: string[]
+  schemaVersion: string
 }
 
 export interface IngredientOption {
@@ -70,6 +82,7 @@ export interface InvoiceReviewJob {
   errorMessage?: string | null
   header: InvoiceHeaderDraft
   lineItems: InvoiceLineItemDraft[]
+  extraction?: InvoiceExtractionSummary
 }
 
 export interface InvoiceReadinessSummary {

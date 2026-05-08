@@ -1,7 +1,7 @@
 import { useState, type ChangeEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, createFileRoute, useNavigate, useRouter } from '@tanstack/react-router'
-import { ArrowLeft, Camera, FileImage, Upload } from 'lucide-react'
+import { Link, createFileRoute, useRouter } from '@tanstack/react-router'
+import { ArrowLeft, Camera, CheckCircle, FileImage, Upload, XCircle } from 'lucide-react'
 
 import { AppShell } from '@/components/app-shell'
 import { Badge } from '@/components/ui/badge'
@@ -49,12 +49,11 @@ export const Route = createFileRoute('/invoices/new')({
 })
 
 function InvoiceIntakePage() {
-  const navigate = useNavigate()
   const router = useRouter()
   const queryClient = useQueryClient()
   const loaderData = Route.useLoaderData()
   const { pipelineEnabled } = loaderData
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [selectedFiles, setSelectedFiles] = useState<SelectedInvoiceFile[]>([])
   const [fileErrorMessage, setFileErrorMessage] = useState<string | null>(null)
 
   const recentJobsQuery = useQuery({
@@ -77,19 +76,13 @@ function InvoiceIntakePage() {
         jobId: result.jobId,
       }
     },
-    onSuccess: async (nextJob) => {
+    onSuccess: async () => {
       setFileErrorMessage(null)
-      setSelectedFile(null)
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['invoice-jobs'] }),
         queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] }),
         router.invalidate(),
       ])
-
-      void navigate({
-        to: '/invoices/review/$jobId',
-        params: { jobId: nextJob.jobId },
-      })
     },
     onError: (error) => {
       setFileErrorMessage(
@@ -98,39 +91,77 @@ function InvoiceIntakePage() {
     },
   })
 
-  const handleCreateJob = async () => {
-    if (!selectedFile || createJobMutation.isPending) {
+  const handleCreateJobs = async () => {
+    if (selectedFiles.length === 0 || createJobMutation.isPending) {
       return
     }
 
-    const validationResult = validateInvoiceUpload(selectedFile)
-    if (!validationResult.isValid) {
-      setFileErrorMessage(validationResult.errorMessage ?? '文件校验失败。')
+    const validFiles = selectedFiles.filter((item) => item.validation.isValid)
+    if (validFiles.length === 0) {
+      setFileErrorMessage('没有可上传的有效文件。')
       return
     }
 
-    createJobMutation.mutate(selectedFile)
+    setFileErrorMessage(null)
+
+    for (const item of validFiles) {
+      setSelectedFiles((currentFiles) =>
+        currentFiles.map((currentFile) =>
+          currentFile.id === item.id
+            ? { ...currentFile, status: 'uploading', errorMessage: null }
+            : currentFile,
+        ),
+      )
+
+      try {
+        const result = await createJobMutation.mutateAsync(item.file)
+        setSelectedFiles((currentFiles) =>
+          currentFiles.map((currentFile) =>
+            currentFile.id === item.id
+              ? { ...currentFile, status: 'created', jobId: result.jobId }
+              : currentFile,
+          ),
+        )
+      } catch (error) {
+        setSelectedFiles((currentFiles) =>
+          currentFiles.map((currentFile) =>
+            currentFile.id === item.id
+              ? {
+                  ...currentFile,
+                  status: 'error',
+                  errorMessage:
+                    error instanceof Error ? error.message : '创建 intake 任务失败。',
+                }
+              : currentFile,
+          ),
+        )
+      }
+    }
+
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['invoice-jobs'] }),
+      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] }),
+      router.invalidate(),
+    ])
   }
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0] ?? null
+    const files = Array.from(event.target.files ?? [])
 
-    if (!file) {
-      setSelectedFile(null)
+    if (files.length === 0) {
+      setSelectedFiles([])
       setFileErrorMessage(null)
       return
     }
 
-    const validationResult = validateInvoiceUpload(file)
-    if (!validationResult.isValid) {
-      setSelectedFile(null)
-      setFileErrorMessage(validationResult.errorMessage ?? '文件校验失败。')
-      event.target.value = ''
-      return
-    }
+    const nextFiles = files.map(createSelectedInvoiceFile)
+    const invalidCount = nextFiles.filter((file) => !file.validation.isValid).length
 
-    setSelectedFile(file)
-    setFileErrorMessage(null)
+    setSelectedFiles(nextFiles)
+    setFileErrorMessage(
+      invalidCount > 0 ? `${invalidCount} 个文件未通过校验，请查看列表。` : null,
+    )
+    event.target.value = ''
   }
 
   return (
@@ -177,7 +208,7 @@ function InvoiceIntakePage() {
                     <Upload className="h-6 w-6 text-muted-foreground" />
                   </div>
                   <Label htmlFor="invoice-file" className="text-base font-medium">
-                    选择发票文件
+                    拍照或上传 PDF/图片
                   </Label>
                   <p className="mt-2 text-sm text-muted-foreground">
                     支持 PDF 或常见图片格式，单文件不超过{' '}
@@ -190,9 +221,27 @@ function InvoiceIntakePage() {
                     id="invoice-file"
                     type="file"
                     accept={INVOICE_UPLOAD_ACCEPT}
+                    multiple
                     className="mt-4 max-w-md rounded-lg"
                     onChange={handleFileChange}
                   />
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                    <Label
+                      htmlFor="invoice-camera-file"
+                      className="inline-flex h-10 cursor-pointer items-center justify-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+                    >
+                      <Camera className="mr-2 h-4 w-4" />
+                      手机拍照
+                    </Label>
+                    <Input
+                      id="invoice-camera-file"
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      className="sr-only"
+                      onChange={handleFileChange}
+                    />
+                  </div>
                   {fileErrorMessage ? (
                     <p className="mt-3 text-sm text-destructive">
                       {fileErrorMessage}
@@ -206,22 +255,65 @@ function InvoiceIntakePage() {
                   <div>
                     <p className="text-sm font-medium">待创建任务</p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      {selectedFile
-                        ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}`
+                      {selectedFiles.length > 0
+                        ? `${selectedFiles.length} 个文件待处理`
                         : '尚未选择文件'}
                     </p>
                   </div>
-                  <Badge variant={selectedFile ? 'default' : 'secondary'} className="rounded-lg">
-                    {selectedFile ? '可创建' : fileErrorMessage ? '校验失败' : '待选择'}
+                  <Badge
+                    variant={hasCreatableFiles(selectedFiles) ? 'default' : 'secondary'}
+                    className="rounded-lg"
+                  >
+                    {hasCreatableFiles(selectedFiles)
+                      ? '可创建'
+                      : fileErrorMessage
+                        ? '校验失败'
+                        : '待选择'}
                   </Badge>
                 </div>
+                {selectedFiles.length > 0 ? (
+                  <div className="mt-4 space-y-2">
+                    {selectedFiles.map((item) => (
+                      <div
+                        key={item.id}
+                        className="flex flex-col gap-2 rounded-lg border px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">{item.file.name}</p>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {formatFileSize(item.file.size)} ·{' '}
+                            {item.file.type || '未知类型'}
+                          </p>
+                          {!item.validation.isValid || item.errorMessage ? (
+                            <p className="mt-1 text-xs text-destructive">
+                              {item.validation.errorMessage ?? item.errorMessage}
+                            </p>
+                          ) : null}
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {item.jobId ? (
+                            <Button variant="secondary" size="sm" className="rounded-lg" asChild>
+                              <Link
+                                to="/invoices/review/$jobId"
+                                params={{ jobId: item.jobId }}
+                              >
+                                打开
+                              </Link>
+                            </Button>
+                          ) : null}
+                          <FileStatusBadge item={item} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
 
               <div className="flex flex-col gap-3 sm:flex-row">
                 <Button
                   className="flex-1 rounded-lg"
-                  disabled={!selectedFile || createJobMutation.isPending}
-                  onClick={() => void handleCreateJob()}
+                  disabled={!hasCreatableFiles(selectedFiles) || createJobMutation.isPending}
+                  onClick={() => void handleCreateJobs()}
                 >
                   <Camera className="mr-2 h-4 w-4" />
                   {createJobMutation.isPending ? '创建中...' : '创建 intake 任务'}
@@ -286,6 +378,68 @@ function InvoiceIntakePage() {
         </div>
       </div>
     </AppShell>
+  )
+}
+
+type SelectedInvoiceFileStatus = 'pending' | 'uploading' | 'created' | 'error'
+
+interface SelectedInvoiceFile {
+  id: string
+  file: File
+  validation: ReturnType<typeof validateInvoiceUpload>
+  status: SelectedInvoiceFileStatus
+  jobId?: string
+  errorMessage?: string | null
+}
+
+function createSelectedInvoiceFile(file: File): SelectedInvoiceFile {
+  return {
+    id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`,
+    file,
+    validation: validateInvoiceUpload(file),
+    status: 'pending',
+    errorMessage: null,
+  }
+}
+
+function hasCreatableFiles(files: SelectedInvoiceFile[]) {
+  return files.some((file) => file.validation.isValid && file.status !== 'created')
+}
+
+function FileStatusBadge({ item }: { item: SelectedInvoiceFile }) {
+  if (!item.validation.isValid || item.status === 'error') {
+    return (
+      <Badge variant="secondary" className="gap-1 rounded-lg bg-rose-100 text-rose-700">
+        <XCircle className="h-3.5 w-3.5" />
+        失败
+      </Badge>
+    )
+  }
+
+  if (item.status === 'created') {
+    return (
+      <Badge
+        variant="secondary"
+        className="gap-1 rounded-lg bg-emerald-100 text-emerald-700"
+      >
+        <CheckCircle className="h-3.5 w-3.5" />
+        已创建
+      </Badge>
+    )
+  }
+
+  if (item.status === 'uploading') {
+    return (
+      <Badge variant="secondary" className="rounded-lg">
+        创建中
+      </Badge>
+    )
+  }
+
+  return (
+    <Badge variant="outline" className="rounded-lg">
+      待上传
+    </Badge>
   )
 }
 

@@ -11,6 +11,7 @@ import {
   type InvoiceReviewJob,
 } from '@/lib/server/app-domain'
 import {
+  INVOICE_EXTRACTION_SCHEMA_VERSION,
   mapIntakeStageToInvoiceStatus,
   parseStoredExtractionDraft,
   serializeExtractionDraft,
@@ -123,7 +124,8 @@ async function persistInvoiceReviewDraft(
         SET
           structured_json = ?,
           markdown_text = ?,
-          raw_response = ?
+          raw_response = ?,
+          schema_version = ?
         WHERE id = ?`,
       )
       .bind(
@@ -133,6 +135,7 @@ async function persistInvoiceReviewDraft(
           source: 'manual-review',
           updatedAt: now,
         }),
+        nextDraft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION,
         latestExtraction.id,
       )
       .run()
@@ -149,7 +152,7 @@ async function persistInvoiceReviewDraft(
           schema_version,
           created_at
         )
-        VALUES (?, ?, ?, ?, ?, 'invoice-extraction-v1', ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         `ext_${job.jobId}`,
@@ -160,6 +163,7 @@ async function persistInvoiceReviewDraft(
           source: 'manual-review',
           createdAt: now,
         }),
+        nextDraft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION,
         now,
       )
       .run()

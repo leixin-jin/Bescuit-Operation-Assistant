@@ -5,6 +5,7 @@ import { intakeJobs, sourceDocuments } from '@/lib/db/schema'
 import type { AppBindings } from '@/lib/server/bindings'
 import { requireBinding } from '@/lib/server/bindings'
 import { enqueueInvoiceIntakeJob } from '@/lib/server/queue'
+import { selectInvoiceExtractionProvider } from '@/lib/server/extraction'
 
 export interface InvoiceUploadResult {
   jobId: string
@@ -58,11 +59,13 @@ export async function uploadInvoiceSourceDocument(input: {
     })
     sourceDocumentStored = true
 
+    const provider = selectInvoiceExtractionProvider(input.env)
+
     await db.insert(intakeJobs).values({
       id: jobId,
       sourceDocumentId,
-      extractorProvider: input.env.AI ? 'workers-ai' : 'heuristic',
-      extractorModel: input.env.AI ? 'to-markdown' : 'filename-fallback-v1',
+      extractorProvider: provider.id,
+      extractorModel: provider.model,
       stage: 'queued',
       createdAt: uploadedAt,
       updatedAt: uploadedAt,

@@ -34,6 +34,24 @@ pnpm smoke
 | `INTAKE_QUEUE` | Queues producer/consumer | `bescuit-operation-assistant-intake` |
 | `AI` | Workers AI | account binding |
 
+发票抽取默认走 Gemini 多模态 provider，`wrangler.jsonc` 中只保存 provider/model 配置，不保存密钥：
+
+| 环境变量 | 用途 |
+| --- | --- |
+| `INVOICE_EXTRACTION_PROVIDER` | 默认 `gemini`；本地未配置时会使用 `heuristic-v1` fallback。 |
+| `INVOICE_EXTRACTION_MODEL` | 默认 `gemini-2.5-flash`。 |
+| `INVOICE_PDF_INPUT_MODE` | 默认 `native-pdf`，直接把 PDF 原始内容作为 Gemini 文件输入。 |
+| `GEMINI_API_KEY` | Gemini API key，必须通过 Wrangler secret 或运行环境注入。 |
+| `GEMINI_API_BASE_URL` | 可选，默认 `https://generativelanguage.googleapis.com/v1beta`。 |
+
+配置 Gemini secret：
+
+```bash
+wrangler secret put GEMINI_API_KEY
+```
+
+Queue 抽取流程直接把 R2 中的 PDF/图片 bytes 传给 provider，并校验 `invoice-extraction-v2` JSON schema；不会再调用 Workers AI `toMarkdown()` 作为生产抽取路径。
+
 已创建的资源：
 
 - D1 database: `bescuit-operation-assistant-db`

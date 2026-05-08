@@ -3,6 +3,15 @@ export interface AppBindings {
   RAW_DOCUMENTS?: R2Bucket
   INTAKE_QUEUE?: Queue<unknown>
   AI?: Ai
+  INVOICE_EXTRACTION_PROVIDER?: string
+  INVOICE_EXTRACTION_FALLBACK_PROVIDER?: string
+  INVOICE_EXTRACTION_MODEL?: string
+  INVOICE_EXTRACTION_TIMEOUT_MS?: string
+  INVOICE_PDF_INPUT_MODE?: string
+  GEMINI_API_KEY?: string
+  GEMINI_API_BASE_URL?: string
+  AI_GATEWAY_BASE_URL?: string
+  AI_GATEWAY_API_TOKEN?: string
   ENABLE_DEMO_DATA?: string
   VITE_ENABLE_DEMO_DATA?: string
   MODE?: string
