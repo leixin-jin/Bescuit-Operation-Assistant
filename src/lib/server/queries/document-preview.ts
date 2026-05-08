@@ -6,7 +6,8 @@ import { allD1, requireD1Database } from '@/lib/server/d1'
 export interface InvoiceDocumentPreview {
   fileName: string
   mimeType: string
-  dataUrl: string
+  dataUrl?: string
+  previewUrl?: string
   kind: 'image' | 'pdf' | 'unsupported'
 }
 
@@ -28,6 +29,52 @@ export async function getInvoiceDocumentPreviewFromDatabase(
   env: Partial<AppBindings> | null | undefined,
   jobId: string,
 ): Promise<InvoiceDocumentPreview> {
+  const { sourceDocument, object, mimeType } = await getInvoiceDocumentObject(env, jobId)
+  const kind = getPreviewKind(mimeType)
+
+  if (kind === 'pdf') {
+    return {
+      fileName: sourceDocument.fileName,
+      mimeType,
+      previewUrl: `/api/invoice-document-preview/${encodeURIComponent(jobId)}`,
+      kind,
+    }
+  }
+
+  const dataUrl =
+    kind === 'image'
+      ? `data:${mimeType};base64,${arrayBufferToBase64(await object.arrayBuffer())}`
+      : undefined
+
+  return {
+    fileName: sourceDocument.fileName,
+    mimeType,
+    dataUrl,
+    kind,
+  }
+}
+
+export async function getInvoiceDocumentPreviewResponse(
+  env: Partial<AppBindings> | null | undefined,
+  jobId: string,
+) {
+  const { sourceDocument, object, mimeType } = await getInvoiceDocumentObject(env, jobId)
+
+  return new Response(object.body, {
+    headers: {
+      'Content-Type': mimeType,
+      'Content-Disposition': `inline; filename="${sanitizeHeaderFileName(
+        sourceDocument.fileName,
+      )}"`,
+      'Cache-Control': 'private, max-age=300',
+    },
+  })
+}
+
+async function getInvoiceDocumentObject(
+  env: Partial<AppBindings> | null | undefined,
+  jobId: string,
+) {
   const db = requireD1Database(env, 'invoice document preview')
   const rawDocumentsBucket = requireBinding(env?.RAW_DOCUMENTS, 'RAW_DOCUMENTS')
   const rows = await allD1<SourceDocumentPreviewRow>(
@@ -59,16 +106,8 @@ export async function getInvoiceDocumentPreviewFromDatabase(
     sourceDocument.mimeType ||
     object.httpMetadata?.contentType ||
     'application/octet-stream'
-  const dataUrl = `data:${mimeType};base64,${arrayBufferToBase64(
-    await object.arrayBuffer(),
-  )}`
 
-  return {
-    fileName: sourceDocument.fileName,
-    mimeType,
-    dataUrl,
-    kind: getPreviewKind(mimeType),
-  }
+  return { sourceDocument, object, mimeType }
 }
 
 function getPreviewKind(mimeType: string): InvoiceDocumentPreview['kind'] {
@@ -81,6 +120,10 @@ function getPreviewKind(mimeType: string): InvoiceDocumentPreview['kind'] {
   }
 
   return 'unsupported'
+}
+
+function sanitizeHeaderFileName(fileName: string) {
+  return fileName.replace(/["\r\n]/g, '_')
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer) {

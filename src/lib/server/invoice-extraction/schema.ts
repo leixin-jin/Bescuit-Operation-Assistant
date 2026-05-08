@@ -7,13 +7,15 @@ import {
 } from '@/lib/server/app-domain'
 
 export const INVOICE_EXTRACTION_SCHEMA_VERSION = 'invoice-extraction-v2'
+const invoiceDocumentKinds = ['pdf', 'image', 'mixed', 'unknown'] as const
+const sourcePageKinds = ['image', 'pdf-page'] as const
 
 export const invoiceExtractionResponseJsonSchema = {
   type: 'object',
   properties: {
-    schemaVersion: { type: 'string' },
+    schemaVersion: { type: 'string', enum: [INVOICE_EXTRACTION_SCHEMA_VERSION] },
     pageCount: { type: 'integer' },
-    documentKind: { type: 'string' },
+    documentKind: { type: 'string', enum: invoiceDocumentKinds },
     header: {
       type: 'object',
       properties: {
@@ -87,7 +89,7 @@ export const invoiceExtractionResponseJsonSchema = {
         type: 'object',
         properties: {
           pageNumber: { type: 'integer' },
-          kind: { type: 'string' },
+          kind: { type: 'string', enum: sourcePageKinds },
           width: { type: 'integer' },
           height: { type: 'integer' },
         },
@@ -109,6 +111,9 @@ export const invoiceExtractionResponseJsonSchema = {
     'model',
   ],
 } as const
+
+type NormalizedInvoiceDocumentKind = (typeof invoiceDocumentKinds)[number]
+type NormalizedSourcePageKind = (typeof sourcePageKinds)[number]
 
 const confidenceSchema = z.object({
   overall: z.number().min(0).max(1),
@@ -185,6 +190,7 @@ export function parseProviderExtractionResponse(input: {
   fileName: string
   provider: string
   model: string
+  documentKind?: NormalizedInvoiceDocumentKind
 }): InvoiceExtractionDraft {
   let parsed: unknown
 
@@ -198,11 +204,7 @@ export function parseProviderExtractionResponse(input: {
 
   const candidate =
     parsed && typeof parsed === 'object'
-      ? {
-          ...(parsed as Record<string, unknown>),
-          provider: input.provider,
-          model: input.model,
-        }
+      ? normalizeProviderOwnedMetadata(parsed as Record<string, unknown>, input)
       : parsed
   const result = invoiceExtractionDraftV2Schema.safeParse(candidate)
 
@@ -213,6 +215,103 @@ export function parseProviderExtractionResponse(input: {
   }
 
   return normalizeV2Draft(result.data, input.fileName)
+}
+
+function normalizeProviderOwnedMetadata(
+  value: Record<string, unknown>,
+  input: {
+    fileName: string
+    provider: string
+    model: string
+    documentKind?: NormalizedInvoiceDocumentKind
+  },
+) {
+  const documentKind =
+    normalizeInvoiceDocumentKind(value.documentKind) ??
+    input.documentKind ??
+    inferDocumentKindFromFileName(input.fileName)
+
+  return {
+    ...value,
+    schemaVersion: INVOICE_EXTRACTION_SCHEMA_VERSION,
+    documentKind,
+    sourcePages: normalizeSourcePages(value.sourcePages, documentKind),
+    provider: input.provider,
+    model: input.model,
+  }
+}
+
+function normalizeInvoiceDocumentKind(
+  value: unknown,
+): NormalizedInvoiceDocumentKind | undefined {
+  return invoiceDocumentKinds.includes(value as NormalizedInvoiceDocumentKind)
+    ? (value as NormalizedInvoiceDocumentKind)
+    : undefined
+}
+
+function inferDocumentKindFromFileName(fileName: string): NormalizedInvoiceDocumentKind {
+  if (/\.pdf$/i.test(fileName)) return 'pdf'
+  if (/\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif)$/i.test(fileName)) return 'image'
+  return 'unknown'
+}
+
+function normalizeSourcePages(
+  value: unknown,
+  documentKind: NormalizedInvoiceDocumentKind,
+) {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+
+  const sourcePages = value
+    .map((item) => normalizeSourcePage(item, documentKind))
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+
+  return sourcePages.length > 0 ? sourcePages : undefined
+}
+
+function normalizeSourcePage(
+  value: unknown,
+  documentKind: NormalizedInvoiceDocumentKind,
+) {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+
+  const sourcePage = value as Record<string, unknown>
+  const pageNumber =
+    typeof sourcePage.pageNumber === 'number' && Number.isFinite(sourcePage.pageNumber)
+      ? Math.round(sourcePage.pageNumber)
+      : null
+  const kind = normalizeSourcePageKind(sourcePage.kind, documentKind)
+
+  if (!pageNumber || pageNumber < 1 || !kind) {
+    return null
+  }
+
+  return {
+    pageNumber,
+    kind,
+    width:
+      typeof sourcePage.width === 'number' && Number.isFinite(sourcePage.width)
+        ? Math.round(sourcePage.width)
+        : undefined,
+    height:
+      typeof sourcePage.height === 'number' && Number.isFinite(sourcePage.height)
+        ? Math.round(sourcePage.height)
+        : undefined,
+  }
+}
+
+function normalizeSourcePageKind(
+  value: unknown,
+  documentKind: NormalizedInvoiceDocumentKind,
+): NormalizedSourcePageKind | undefined {
+  if (value === 'image' || value === 'photo') return 'image'
+  if (value === 'pdf-page' || value === 'pdf' || value === 'page') return 'pdf-page'
+  if (documentKind === 'image') return 'image'
+  if (documentKind === 'pdf' || documentKind === 'mixed') return 'pdf-page'
+  return undefined
 }
 
 export function normalizeV2Draft(

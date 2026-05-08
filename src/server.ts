@@ -2,6 +2,7 @@ import handler from '@tanstack/react-start/server-entry'
 
 import { type AppBindings } from '@/lib/server/bindings'
 import { processInvoiceIntakeQueueMessage } from '@/lib/server/extraction'
+import { getInvoiceDocumentPreviewResponse } from '@/lib/server/queries/document-preview'
 import {
   isInvoiceIntakeQueueMessage,
   MAX_QUEUE_CONSUMER_ATTEMPTS,
@@ -11,6 +12,19 @@ import {
 
 export default {
   fetch(request: Request, env: AppBindings, ctx: ExecutionContext) {
+    const url = new URL(request.url)
+    const documentPreviewPrefix = '/api/invoice-document-preview/'
+
+    if (url.pathname.startsWith(documentPreviewPrefix)) {
+      const jobId = decodeURIComponent(url.pathname.slice(documentPreviewPrefix.length))
+
+      if (!jobId) {
+        return new Response('Missing invoice job id', { status: 400 })
+      }
+
+      return getInvoiceDocumentPreviewResponse(env, jobId)
+    }
+
     const handlerOptions = {
       context: {
         env,

@@ -10,7 +10,10 @@ import {
   getMonthlyAnalyticsSummaryFromDatabase,
 } from '@/lib/server/queries/analytics'
 import { getDashboardSummaryFromDatabase } from '@/lib/server/queries/dashboard'
-import { getInvoiceDocumentPreviewFromDatabase } from '@/lib/server/queries/document-preview'
+import {
+  getInvoiceDocumentPreviewFromDatabase,
+  getInvoiceDocumentPreviewResponse,
+} from '@/lib/server/queries/document-preview'
 import { listIngredientOptionsFromDatabase } from '@/lib/server/queries/ingredients'
 import { getSalesRecordFromDatabase } from '@/lib/server/queries/sales'
 import {
@@ -236,6 +239,44 @@ describe('invoice review D1 integration', () => {
       dataUrl: 'data:image/png;base64,cHJldmlldy1ieXRlcw==',
       kind: 'image',
     })
+  })
+
+  test('pdf document preview uses a same-origin response stream instead of a data URL', async () => {
+    const { env } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-pdf',
+          r2_key: 'raw-documents/2026/04/src-pdf-invoice.pdf',
+          original_filename: 'invoice.pdf',
+          mime_type: 'application/pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-pdf',
+          source_document_id: 'src-pdf',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-pdf-invoice.pdf': {
+        body: '%PDF-preview-bytes',
+        contentType: 'application/pdf',
+      },
+    })
+
+    await expect(getInvoiceDocumentPreviewFromDatabase(env, 'job-pdf')).resolves.toEqual({
+      fileName: 'invoice.pdf',
+      mimeType: 'application/pdf',
+      previewUrl: '/api/invoice-document-preview/job-pdf',
+      kind: 'pdf',
+    })
+
+    const response = await getInvoiceDocumentPreviewResponse(env, 'job-pdf')
+
+    expect(response.headers.get('content-type')).toBe('application/pdf')
+    expect(response.headers.get('content-disposition')).toContain('inline')
+    await expect(response.text()).resolves.toBe('%PDF-preview-bytes')
   })
 
   test('ingredient options come from the ingredients table', async () => {
@@ -1004,6 +1045,7 @@ function createFakeR2Bucket(
         httpMetadata: {
           contentType: object.contentType,
         },
+        body: object.body,
         arrayBuffer: async () => new TextEncoder().encode(object.body).buffer,
       }
     },

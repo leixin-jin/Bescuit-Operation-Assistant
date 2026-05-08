@@ -62,6 +62,7 @@ export function createGeminiInvoiceExtractionProvider(
           fileName: input.fileName,
           provider: 'gemini',
           model: options.model,
+          documentKind: input.documentKind,
         }),
         rawResponse: JSON.stringify({
           provider: 'gemini',

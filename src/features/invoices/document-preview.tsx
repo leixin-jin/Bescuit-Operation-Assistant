@@ -168,7 +168,7 @@ function DocumentPreviewContent({
   if (preview.kind === 'pdf') {
     return (
       <iframe
-        src={preview.dataUrl}
+        src={preview.previewUrl}
         title={preview.fileName}
         className="h-full min-h-[560px] w-full rounded-xl border bg-white"
       />

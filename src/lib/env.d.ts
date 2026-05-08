@@ -11,7 +11,7 @@ declare namespace Cloudflare {
 		INTAKE_QUEUE: Queue;
 		AI: Ai;
 		INVOICE_EXTRACTION_PROVIDER: "gemini";
-		INVOICE_EXTRACTION_MODEL: "gemini-2.5-flash";
+		INVOICE_EXTRACTION_MODEL: "gemini-3.1-flash-lite";
 		INVOICE_PDF_INPUT_MODE: "native-pdf";
 	}
 }

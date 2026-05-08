@@ -39,7 +39,7 @@ pnpm smoke
 | 环境变量 | 用途 |
 | --- | --- |
 | `INVOICE_EXTRACTION_PROVIDER` | 默认 `gemini`；本地未配置时会使用 `heuristic-v1` fallback。 |
-| `INVOICE_EXTRACTION_MODEL` | 默认 `gemini-2.5-flash`。 |
+| `INVOICE_EXTRACTION_MODEL` | 默认 `gemini-3.1-flash-lite`。 |
 | `INVOICE_PDF_INPUT_MODE` | 默认 `native-pdf`，直接把 PDF 原始内容作为 Gemini 文件输入。 |
 | `GEMINI_API_KEY` | Gemini API key，必须通过 Wrangler secret 或运行环境注入。 |
 | `GEMINI_API_BASE_URL` | 可选，默认 `https://generativelanguage.googleapis.com/v1beta`。 |

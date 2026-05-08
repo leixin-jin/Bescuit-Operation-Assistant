@@ -51,7 +51,7 @@ describe('invoice extraction helpers', () => {
       },
       warnings: [],
       provider: 'gemini',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.1-flash-lite',
     }
     const fetchMock = vi.fn(async () =>
       new Response(
@@ -71,7 +71,7 @@ describe('invoice extraction helpers', () => {
     try {
       const provider = createGeminiInvoiceExtractionProvider({
         apiKey: 'test-key',
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.1-flash-lite',
         timeoutMs: 1000,
       })
 
@@ -114,12 +114,12 @@ describe('invoice extraction helpers', () => {
   test('selects Gemini provider from configured extraction env', () => {
     const provider = selectInvoiceExtractionProvider({
       INVOICE_EXTRACTION_PROVIDER: 'gemini',
-      INVOICE_EXTRACTION_MODEL: 'gemini-2.5-flash',
+      INVOICE_EXTRACTION_MODEL: 'gemini-3.1-flash-lite',
       GEMINI_API_KEY: 'test-key',
     })
 
     expect(provider.id).toBe('gemini')
-    expect(provider.model).toBe('gemini-2.5-flash')
+    expect(provider.model).toBe('gemini-3.1-flash-lite')
   })
 
   test('rejects provider JSON that does not match v2 schema', () => {
@@ -132,9 +132,64 @@ describe('invoice extraction helpers', () => {
         }),
         fileName: 'bad.pdf',
         provider: 'gemini',
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.1-flash-lite',
       }),
     ).toThrow(/schema/i)
+  })
+
+  test('normalizes provider-owned metadata before validating Gemini JSON', () => {
+    const draft = parseProviderExtractionResponse({
+      rawJson: JSON.stringify({
+        pageCount: 2,
+        documentKind: 'invoice',
+        header: {
+          supplier: 'Proveedor SL',
+          invoiceNo: 'F-101',
+          date: '2026-05-08',
+          subtotalAmount: '40.00',
+          taxAmount: '8.40',
+          totalAmount: '48.40',
+          currency: 'EUR',
+          notes: '',
+        },
+        lineItems: [
+          {
+            id: 'item-1',
+            name: 'Aceite',
+            qty: '2',
+            unit: 'l',
+            unitPrice: '20.00',
+            lineTotal: '40.00',
+            ingredient: '',
+            matched: false,
+          },
+        ],
+        confidence: {
+          overall: 0.8,
+          header: 0.9,
+          lineItems: 0.75,
+          totals: 0.85,
+        },
+        warnings: [],
+        sourcePages: [
+          { pageNumber: 1, kind: 'pdf' },
+          { pageNumber: 2, kind: 'page' },
+        ],
+      }),
+      fileName: 'factura.pdf',
+      provider: 'gemini',
+      model: 'gemini-3.1-flash-lite',
+      documentKind: 'pdf',
+    })
+
+    expect(draft).toMatchObject({
+      schemaVersion: 'invoice-extraction-v2',
+      documentKind: 'pdf',
+      sourcePages: [
+        { pageNumber: 1, kind: 'pdf-page' },
+        { pageNumber: 2, kind: 'pdf-page' },
+      ],
+    })
   })
 
   test('rehydrates v2 confidence and warnings for review jobs', () => {
@@ -179,13 +234,13 @@ describe('invoice extraction helpers', () => {
         },
         warnings: ['Line item total requires review'],
         provider: 'gemini',
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.1-flash-lite',
       }),
     })
 
     expect(job.extraction).toMatchObject({
       provider: 'gemini',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.1-flash-lite',
       overallConfidence: 0.81,
       warnings: ['Line item total requires review'],
       schemaVersion: 'invoice-extraction-v2',
