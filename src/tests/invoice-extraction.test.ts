@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import {
   buildInvoiceProviderInput,
@@ -13,8 +13,91 @@ import {
   serializeExtractionDraft,
 } from '@/lib/server/extraction'
 import { getInvoiceJobStage, getInvoiceStatusLabel, isInvoiceJobProcessing } from '@/lib/server/app-domain'
+import { createGeminiInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/gemini-provider'
 
 describe('invoice extraction helpers', () => {
+  test('sends Gemini structured output fields accepted by generateContent REST API', async () => {
+    const responseJson = {
+      schemaVersion: 'invoice-extraction-v2',
+      pageCount: 1,
+      documentKind: 'image',
+      header: {
+        supplier: 'Proveedor SL',
+        invoiceNo: 'F-100',
+        date: '2026-04-18',
+        subtotalAmount: '80.00',
+        taxAmount: '16.80',
+        totalAmount: '96.80',
+        currency: 'EUR',
+        notes: '',
+      },
+      lineItems: [
+        {
+          id: 'item-1',
+          name: 'Tomate',
+          qty: '10',
+          unit: 'kg',
+          unitPrice: '2.00',
+          lineTotal: '20.00',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+      confidence: {
+        overall: 0.81,
+        header: 0.9,
+        lineItems: 0.7,
+        totals: 0.83,
+      },
+      warnings: [],
+      provider: 'gemini',
+      model: 'gemini-2.5-flash',
+    }
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [{ text: JSON.stringify(responseJson) }],
+              },
+            },
+          ],
+        }),
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const provider = createGeminiInvoiceExtractionProvider({
+        apiKey: 'test-key',
+        model: 'gemini-2.5-flash',
+        timeoutMs: 1000,
+      })
+
+      await provider.extract({
+        fileName: 'factura.jpg',
+        mimeType: 'image/jpeg',
+        arrayBuffer: new ArrayBuffer(0),
+        size: 0,
+        base64: 'ZmFrZQ==',
+        dataUrl: 'data:image/jpeg;base64,ZmFrZQ==',
+        documentKind: 'image',
+      })
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)
+      expect(requestBody.generationConfig).toMatchObject({
+        responseMimeType: 'application/json',
+        responseSchema: expect.objectContaining({
+          type: 'object',
+        }),
+      })
+      expect(requestBody.generationConfig).not.toHaveProperty('responseFormat')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   test('builds provider input from original image bytes without markdown', async () => {
     const input = await buildInvoiceProviderInput({
       fileName: 'ticket.jpg',

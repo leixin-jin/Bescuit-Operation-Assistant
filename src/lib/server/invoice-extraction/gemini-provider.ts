@@ -50,12 +50,8 @@ export function createGeminiInvoiceExtractionProvider(
           },
         ],
         generationConfig: {
-          responseFormat: {
-            text: {
-              mimeType: 'application/json',
-              schema: invoiceExtractionResponseJsonSchema,
-            },
-          },
+          responseMimeType: 'application/json',
+          responseSchema: invoiceExtractionResponseJsonSchema,
         },
       })
       const rawJson = extractGeminiText(response)
