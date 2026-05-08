@@ -341,6 +341,29 @@ function InvoiceReviewWorkbenchPage() {
 
                   <div className="flex h-[55%] flex-col lg:h-full lg:w-[44%]">
                     <div className="flex-1 space-y-6 overflow-auto p-6">
+                      {editableJob.extraction ? (
+                        <div className="rounded-xl border bg-background p-4">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="outline" className="rounded-lg">
+                              {editableJob.extraction.provider}
+                            </Badge>
+                            <Badge variant="outline" className="rounded-lg">
+                              {editableJob.extraction.model}
+                            </Badge>
+                            <Badge variant="secondary" className="rounded-lg">
+                              置信度{' '}
+                              {formatConfidence(editableJob.extraction.overallConfidence)}
+                            </Badge>
+                          </div>
+                          {editableJob.extraction.warnings.length > 0 ? (
+                            <div className="mt-3 space-y-1 text-sm text-amber-700">
+                              {editableJob.extraction.warnings.map((warning) => (
+                                <p key={warning}>· {warning}</p>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                       <ReviewHeaderForm
                         header={editableJob.header}
                         disabled={isPipelineJobProcessing}
@@ -499,4 +522,8 @@ function mergeReviewFormValues(
 
 function isDecimalInput(value: string) {
   return value === '' || /^\d*\.?\d*$/.test(value)
+}
+
+function formatConfidence(value: number | undefined) {
+  return typeof value === 'number' ? `${Math.round(value * 100)}%` : '未提供'
 }

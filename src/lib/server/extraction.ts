@@ -9,36 +9,44 @@ import {
   type InvoiceLineItemDraft,
   type InvoiceReviewJob,
 } from '@/lib/server/app-domain'
+import { requireBinding, type AppBindings } from '@/lib/server/bindings'
 import {
-  hasWorkersAiBinding,
-  requireBinding,
-  type AppBindings,
-} from '@/lib/server/bindings'
+  buildInvoiceProviderInput,
+  type InvoiceDocumentKind,
+} from '@/lib/server/invoice-extraction/file-input'
+import { selectInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/providers'
+import {
+  INVOICE_EXTRACTION_SCHEMA_VERSION,
+  parseProviderExtractionResponse,
+  type InvoiceExtractionDraft,
+} from '@/lib/server/invoice-extraction/schema'
 import type { InvoiceIntakeQueueMessage } from '@/lib/server/queue'
 
-export interface InvoiceExtractionDraft {
-  pageCount: number
-  header: InvoiceHeaderDraft
-  lineItems: InvoiceLineItemDraft[]
-  markdownText: string
-  provider: string
-  model: string
+export {
+  buildInvoiceProviderInput,
+  INVOICE_EXTRACTION_SCHEMA_VERSION,
+  parseProviderExtractionResponse,
+  selectInvoiceExtractionProvider,
 }
+export type { InvoiceExtractionDraft } from '@/lib/server/invoice-extraction/schema'
 
 interface StoredInvoiceExtractionDraft {
+  schemaVersion?: string
   pageCount?: number
+  documentKind?: InvoiceDocumentKind
   header?: Partial<InvoiceHeaderDraft>
   lineItems?: Array<Partial<InvoiceLineItemDraft>>
   markdownText?: string
   provider?: string
   model?: string
-}
-
-interface DocumentNormalizationResult {
-  markdownText: string
-  provider: string
-  model: string
-  rawResponse: string | null
+  confidence?: {
+    overall?: number
+    header?: number
+    lineItems?: number
+    totals?: number
+  }
+  warnings?: string[]
+  extractedText?: string
 }
 
 export function createPendingExtractionDraft(
@@ -91,10 +99,15 @@ export function parseStoredExtractionDraft(
         .filter((item): item is InvoiceLineItemDraft => item !== null) ?? []
 
     return {
+      schemaVersion:
+        parsed.schemaVersion === INVOICE_EXTRACTION_SCHEMA_VERSION
+          ? INVOICE_EXTRACTION_SCHEMA_VERSION
+          : undefined,
       pageCount:
         typeof parsed.pageCount === 'number' && parsed.pageCount > 0
           ? Math.round(parsed.pageCount)
           : pendingDraft.pageCount,
+      documentKind: normalizeDocumentKind(parsed.documentKind),
       header: normalizeHeaderDraft(parsed.header, pendingDraft.header),
       lineItems:
         lineItems.length > 0 ? lineItems : pendingDraft.lineItems.map(cloneLineItemDraft),
@@ -110,6 +123,12 @@ export function parseStoredExtractionDraft(
         typeof parsed.model === 'string' && parsed.model.length > 0
           ? parsed.model
           : pendingDraft.model,
+      confidence: normalizeConfidence(parsed.confidence),
+      warnings: Array.isArray(parsed.warnings)
+        ? parsed.warnings.filter((warning): warning is string => typeof warning === 'string')
+        : undefined,
+      extractedText:
+        typeof parsed.extractedText === 'string' ? parsed.extractedText : undefined,
     }
   } catch {
     return createPendingExtractionDraft(fileName)
@@ -157,6 +176,13 @@ export function buildInvoiceReviewJob(input: {
     errorMessage: input.errorMessage ?? null,
     header: draft.header,
     lineItems: draft.lineItems.map(cloneLineItemDraft),
+    extraction: {
+      provider: draft.provider,
+      model: draft.model,
+      overallConfidence: draft.confidence?.overall,
+      warnings: draft.warnings ?? [],
+      schemaVersion: draft.schemaVersion ?? 'invoice-extraction-v1',
+    },
   }
 }
 
@@ -259,19 +285,18 @@ export async function processInvoiceIntakeQueueMessage(
       message.mimeType ||
       documentObject.httpMetadata?.contentType ||
       'application/octet-stream'
-    const blob = new Blob([await documentObject.arrayBuffer()], { type: mimeType })
-    const normalization = await normalizeInvoiceDocument(env, {
+    const providerInput = await buildInvoiceProviderInput({
       fileName: message.fileName,
-      blob,
+      mimeType,
+      arrayBuffer: await documentObject.arrayBuffer(),
     })
-    const extractionDraft = extractInvoiceReviewDraft({
-      fileName: message.fileName,
-      markdownText: normalization.markdownText,
-      provider: normalization.provider,
-      model: normalization.model,
-    })
+    const provider = selectInvoiceExtractionProvider(env)
+    const extraction = await provider.extract(providerInput)
+    const extractionDraft = extraction.draft
 
     const extractionStoredAt = new Date().toISOString()
+    const schemaVersion =
+      extractionDraft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION
 
     await db
       .insert(extractionResults)
@@ -280,8 +305,8 @@ export async function processInvoiceIntakeQueueMessage(
         intakeJobId: message.jobId,
         markdownText: extractionDraft.markdownText,
         structuredJson: serializeExtractionDraft(extractionDraft),
-        rawResponse: normalization.rawResponse,
-        schemaVersion: 'invoice-extraction-v1',
+        rawResponse: extraction.rawResponse,
+        schemaVersion,
         createdAt: extractionStoredAt,
       })
       .onConflictDoUpdate({
@@ -289,8 +314,8 @@ export async function processInvoiceIntakeQueueMessage(
         set: {
           markdownText: extractionDraft.markdownText,
           structuredJson: serializeExtractionDraft(extractionDraft),
-          rawResponse: normalization.rawResponse,
-          schemaVersion: 'invoice-extraction-v1',
+          rawResponse: extraction.rawResponse,
+          schemaVersion,
           createdAt: extractionStoredAt,
         },
       })
@@ -301,8 +326,8 @@ export async function processInvoiceIntakeQueueMessage(
       .update(intakeJobs)
       .set({
         stage: 'needs_review',
-        extractorProvider: normalization.provider,
-        extractorModel: normalization.model,
+        extractorProvider: provider.id,
+        extractorModel: provider.model,
         confidenceScore: calculateDraftConfidence(extractionDraft),
         errorMessage: null,
         updatedAt: finishedAt,
@@ -352,46 +377,6 @@ export function getExtractionResultId(jobId: string) {
   return `ext_${jobId}`
 }
 
-async function normalizeInvoiceDocument(
-  env: AppBindings,
-  input: {
-    fileName: string
-    blob: Blob
-  },
-): Promise<DocumentNormalizationResult> {
-  if (hasWorkersAiBinding(env)) {
-    const conversionResult = await env.AI.toMarkdown({
-      name: input.fileName,
-      blob: input.blob,
-    })
-
-    if (conversionResult.format !== 'markdown') {
-      throw new Error(
-        `Unsupported AI normalization format: ${conversionResult.format}`,
-      )
-    }
-
-    return {
-      markdownText: conversionResult.data,
-      provider: 'workers-ai',
-      model: 'to-markdown',
-      rawResponse: JSON.stringify({
-        id: conversionResult.id,
-        mimeType: conversionResult.mimeType,
-        tokens: conversionResult.tokens,
-        format: conversionResult.format,
-      }),
-    }
-  }
-
-  return {
-    markdownText: '',
-    provider: 'heuristic',
-    model: 'filename-fallback-v1',
-    rawResponse: null,
-  }
-}
-
 function normalizeHeaderDraft(
   value: Partial<InvoiceHeaderDraft> | undefined,
   fallback: InvoiceHeaderDraft,
@@ -430,10 +415,20 @@ function normalizeLineItemDraft(
     qty: typeof value.qty === 'string' ? value.qty : '',
     unit: typeof value.unit === 'string' ? value.unit : '',
     unitPrice: typeof value.unitPrice === 'string' ? value.unitPrice : '',
+    lineTotal: typeof value.lineTotal === 'string' ? value.lineTotal : undefined,
+    taxRate: typeof value.taxRate === 'string' ? value.taxRate : undefined,
     ingredient: typeof value.ingredient === 'string' ? value.ingredient : '',
     matched:
       (typeof value.ingredient === 'string' && value.ingredient.trim().length > 0) ||
       value.matched === true,
+    confidence:
+      typeof value.confidence === 'number' && Number.isFinite(value.confidence)
+        ? Math.max(0, Math.min(1, value.confidence))
+        : undefined,
+    sourceText:
+      typeof value.sourceText === 'string' && value.sourceText.trim().length > 0
+        ? value.sourceText
+        : undefined,
   }
 }
 
@@ -573,6 +568,10 @@ function inferUnit(cells: string[]) {
 }
 
 function calculateDraftConfidence(draft: InvoiceExtractionDraft) {
+  if (typeof draft.confidence?.overall === 'number') {
+    return Math.max(0, Math.min(1, Number(draft.confidence.overall.toFixed(2))))
+  }
+
   const headerFields = [
     draft.header.supplier,
     draft.header.invoiceNo,
@@ -584,6 +583,31 @@ function calculateDraftConfidence(draft: InvoiceExtractionDraft) {
   const lineItemSignal = draft.lineItems.some((item) => item.name.trim().length > 0) ? 1 : 0
 
   return Math.min(1, Number(((completedHeaderCount + lineItemSignal) / 6).toFixed(2)))
+}
+
+function normalizeDocumentKind(value: unknown): InvoiceDocumentKind | undefined {
+  return value === 'pdf' || value === 'image' || value === 'mixed' || value === 'unknown'
+    ? value
+    : undefined
+}
+
+function normalizeConfidence(value: StoredInvoiceExtractionDraft['confidence']) {
+  if (!value) {
+    return undefined
+  }
+
+  return {
+    overall: normalizeConfidenceValue(value.overall),
+    header: normalizeConfidenceValue(value.header),
+    lineItems: normalizeConfidenceValue(value.lineItems),
+    totals: normalizeConfidenceValue(value.totals),
+  }
+}
+
+function normalizeConfidenceValue(value: number | undefined) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : 0
 }
 
 function normalizeMoneyValue(value: string) {

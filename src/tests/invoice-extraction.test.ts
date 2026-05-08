@@ -1,17 +1,119 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  buildInvoiceProviderInput,
   buildInvoiceReviewJob,
   extractInvoiceReviewDraft,
   getExtractionResultId,
   isTerminalIntakeStage,
   mapIntakeStageToInvoiceStatus,
+  parseProviderExtractionResponse,
   parseStoredExtractionDraft,
+  selectInvoiceExtractionProvider,
   serializeExtractionDraft,
 } from '@/lib/server/extraction'
 import { getInvoiceJobStage, getInvoiceStatusLabel, isInvoiceJobProcessing } from '@/lib/server/app-domain'
 
 describe('invoice extraction helpers', () => {
+  test('builds provider input from original image bytes without markdown', async () => {
+    const input = await buildInvoiceProviderInput({
+      fileName: 'ticket.jpg',
+      mimeType: 'image/jpeg',
+      arrayBuffer: new TextEncoder().encode('fake-image').buffer,
+    })
+
+    expect(input.documentKind).toBe('image')
+    expect(input.base64).toBe('ZmFrZS1pbWFnZQ==')
+    expect(input.dataUrl).toBe('data:image/jpeg;base64,ZmFrZS1pbWFnZQ==')
+    expect(input).not.toHaveProperty('markdownText')
+  })
+
+  test('selects Gemini provider from configured extraction env', () => {
+    const provider = selectInvoiceExtractionProvider({
+      INVOICE_EXTRACTION_PROVIDER: 'gemini',
+      INVOICE_EXTRACTION_MODEL: 'gemini-2.5-flash',
+      GEMINI_API_KEY: 'test-key',
+    })
+
+    expect(provider.id).toBe('gemini')
+    expect(provider.model).toBe('gemini-2.5-flash')
+  })
+
+  test('rejects provider JSON that does not match v2 schema', () => {
+    expect(() =>
+      parseProviderExtractionResponse({
+        rawJson: JSON.stringify({
+          schemaVersion: 'invoice-extraction-v2',
+          header: { supplier: 'Missing totals' },
+          lineItems: [],
+        }),
+        fileName: 'bad.pdf',
+        provider: 'gemini',
+        model: 'gemini-2.5-flash',
+      }),
+    ).toThrow(/schema/i)
+  })
+
+  test('rehydrates v2 confidence and warnings for review jobs', () => {
+    const job = buildInvoiceReviewJob({
+      jobId: 'job-v2',
+      fileName: 'factura.pdf',
+      uploadedAt: '2026-04-18T08:00:00.000Z',
+      stage: 'needs_review',
+      structuredJson: JSON.stringify({
+        schemaVersion: 'invoice-extraction-v2',
+        pageCount: 2,
+        documentKind: 'pdf',
+        header: {
+          supplier: 'Proveedor SL',
+          invoiceNo: 'F-100',
+          date: '2026-04-18',
+          subtotalAmount: '80.00',
+          taxAmount: '16.80',
+          totalAmount: '96.80',
+          currency: 'EUR',
+          notes: 'Validar descuento',
+        },
+        lineItems: [
+          {
+            id: 'item-1',
+            name: 'Tomate',
+            qty: '10',
+            unit: 'kg',
+            unitPrice: '2.00',
+            lineTotal: '20.00',
+            ingredient: '',
+            matched: false,
+            confidence: 0.74,
+            sourceText: 'Tomate 10 kg 20,00',
+          },
+        ],
+        confidence: {
+          overall: 0.81,
+          header: 0.9,
+          lineItems: 0.7,
+          totals: 0.83,
+        },
+        warnings: ['Line item total requires review'],
+        provider: 'gemini',
+        model: 'gemini-2.5-flash',
+      }),
+    })
+
+    expect(job.extraction).toMatchObject({
+      provider: 'gemini',
+      model: 'gemini-2.5-flash',
+      overallConfidence: 0.81,
+      warnings: ['Line item total requires review'],
+      schemaVersion: 'invoice-extraction-v2',
+    })
+    expect(job.lineItems[0]).toMatchObject({
+      lineTotal: '20.00',
+      confidence: 0.74,
+      sourceText: 'Tomate 10 kg 20,00',
+    })
+  })
+
   test('extracts a review draft from markdown table content', () => {
     const draft = extractInvoiceReviewDraft({
       fileName: 'metro-factura-2026-04.pdf',

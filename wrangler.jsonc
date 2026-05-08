@@ -4,6 +4,11 @@
   "compatibility_date": "2026-04-23",
   "compatibility_flags": ["nodejs_compat"],
   "main": "./src/server.ts",
+  "vars": {
+    "INVOICE_EXTRACTION_PROVIDER": "gemini",
+    "INVOICE_EXTRACTION_MODEL": "gemini-2.5-flash",
+    "INVOICE_PDF_INPUT_MODE": "native-pdf"
+  },
   "observability": {
     "enabled": true
   },

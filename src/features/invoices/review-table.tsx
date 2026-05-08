@@ -65,7 +65,23 @@ export function ReviewTable({
       }),
       columnHelper.accessor('name', {
         header: '品名',
-        cell: ({ getValue }) => <span className="font-medium">{getValue()}</span>,
+        cell: ({ row, getValue }) => (
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">{getValue()}</span>
+              {typeof row.original.confidence === 'number' ? (
+                <Badge variant="outline" className="rounded-lg text-[11px]">
+                  {Math.round(row.original.confidence * 100)}%
+                </Badge>
+              ) : null}
+            </div>
+            {row.original.sourceText ? (
+              <p className="mt-1 max-w-64 truncate text-xs text-muted-foreground">
+                {row.original.sourceText}
+              </p>
+            ) : null}
+          </div>
+        ),
       }),
       columnHelper.display({
         id: 'quantity',
@@ -101,9 +117,13 @@ export function ReviewTable({
         id: 'lineTotal',
         header: () => <span className="block text-right">小计</span>,
         cell: ({ row }) => {
-          const lineTotal =
-            (Number.parseFloat(row.original.qty) || 0) *
-            (Number.parseFloat(row.original.unitPrice) || 0)
+          const calculatedLineTotal = row.original.lineTotal
+            ? Number.parseFloat(row.original.lineTotal)
+            : (Number.parseFloat(row.original.qty) || 0) *
+              (Number.parseFloat(row.original.unitPrice) || 0)
+          const lineTotal = Number.isFinite(calculatedLineTotal)
+            ? calculatedLineTotal
+            : 0
 
           return (
             <span className="block text-right font-medium">
