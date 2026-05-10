@@ -26,6 +26,12 @@ export interface SalesDailyDraftInput {
   notes: string
 }
 
+export interface SalesTotalEntryInput {
+  total: string
+  bbva: string
+  caixa: string
+}
+
 export type InvoiceJobStatus = 'uploaded' | 'needs_review' | 'ready' | 'error'
 
 export type InvoiceIntakeStage =
@@ -236,6 +242,28 @@ export function normalizeSalesDraftInput(
   }
 }
 
+export function deriveSalesChannelAmounts(
+  input: SalesTotalEntryInput,
+): Record<PaymentChannelId, string> {
+  const bbvaAmount = parseCurrencyAmount(input.bbva)
+  const caixaAmount = parseCurrencyAmount(input.caixa)
+  const cashAmount = getDerivedCashAmount(input)
+
+  return {
+    bbva: formatSalesPayloadAmount(bbvaAmount),
+    caixa: formatSalesPayloadAmount(caixaAmount),
+    efectivo: formatSalesPayloadAmount(cashAmount),
+  }
+}
+
+export function getDerivedCashAmount(input: SalesTotalEntryInput) {
+  const totalAmount = parseCurrencyAmount(input.total)
+  const bbvaAmount = parseCurrencyAmount(input.bbva)
+  const caixaAmount = parseCurrencyAmount(input.caixa)
+
+  return roundCurrency(totalAmount - bbvaAmount - caixaAmount)
+}
+
 export function getInvoiceReadinessSummary(
   job: Pick<InvoiceReviewJob, 'header' | 'lineItems'>,
 ): InvoiceReadinessSummary {
@@ -289,6 +317,10 @@ export function roundCurrency(value: number) {
 function normalizeDecimalString(value: string) {
   const parsedValue = Number.parseFloat(value)
   return Number.isFinite(parsedValue) ? roundCurrency(parsedValue) : 0
+}
+
+function formatSalesPayloadAmount(value: number) {
+  return roundCurrency(value).toFixed(2)
 }
 
 function getMissingRequiredHeaderFields(header: InvoiceHeaderDraft) {
