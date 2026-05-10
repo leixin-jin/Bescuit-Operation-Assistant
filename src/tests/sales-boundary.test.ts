@@ -21,7 +21,6 @@ describe('sales query and mutation boundaries', () => {
     const date = getMadridTodayInputValue()
     const month = date.slice(0, 7)
     const dayKey = String(Number.parseInt(date.slice(8, 10), 10))
-    const baselineSummary = await getCalendarAnalyticsSummary(month)
 
     const draftRecord = await saveSalesDraft({
       date,
@@ -40,7 +39,7 @@ describe('sales query and mutation boundaries', () => {
     expect(draftRecord.status).toBe('draft')
     expect(storedDraftRecord?.status).toBe('draft')
     expect(dashboardAfterDraft.salesRecordedToday).toBe(false)
-    expect(analyticsAfterDraft.days[dayKey]).toEqual(baselineSummary.days[dayKey])
+    expect(analyticsAfterDraft.days[dayKey]).toBeUndefined()
   })
 
   test('submitted sales count as recorded daily revenue and drive analytics', async () => {

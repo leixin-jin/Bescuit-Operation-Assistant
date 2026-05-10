@@ -2,7 +2,14 @@ import { useEffect, useState } from 'react'
 import { useForm } from '@tanstack/react-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, createFileRoute, useRouter } from '@tanstack/react-router'
-import { ArrowLeft, CalendarIcon, CheckCircle, Euro, Save } from 'lucide-react'
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CalendarIcon,
+  CheckCircle,
+  Euro,
+  Save,
+} from 'lucide-react'
 
 import { AppShell } from '@/components/app-shell'
 import { Button } from '@/components/ui/button'
@@ -11,6 +18,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import {
+  deriveSalesChannelAmounts,
+  getDerivedCashAmount,
   getMadridTodayInputValue,
   paymentChannels,
   type SalesDailyDraftInput,
@@ -79,6 +88,11 @@ function SalesEntryPage() {
     ),
     onSubmitMeta: { mode: 'submit' as SalesPersistMode },
     onSubmit: async ({ value, meta }) => {
+      if (!isSalesFormSubmittable(value)) {
+        setFeedbackMessage('TOTAL 不能为空，且不能小于 BBVA 和 CAIXA 的合计。')
+        return
+      }
+
       await saveSalesMutation.mutateAsync({ mode: meta.mode, value })
     },
   })
@@ -147,7 +161,7 @@ function SalesEntryPage() {
               <CardTitle className="text-base">收款渠道</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              {loaderData.paymentChannels.map((channel) => (
+              {salesEntryInputs.map((channel) => (
                 <div key={channel.id} className="space-y-2">
                   <Label htmlFor={channel.id} className="flex items-center gap-2">
                     <span className={`h-2.5 w-2.5 rounded-full ${channel.color}`} />
@@ -177,6 +191,42 @@ function SalesEntryPage() {
                   </div>
                 </div>
               ))}
+
+              <form.Subscribe
+                selector={(state) => {
+                  const cashAmount = getDerivedCashAmount(state.values)
+
+                  return {
+                    cashAmount,
+                    isNegativeCash: cashAmount < 0,
+                  }
+                }}
+                children={({ cashAmount, isNegativeCash }) => (
+                  <div className="space-y-2">
+                    <Label htmlFor="efectivo" className="flex items-center gap-2">
+                      <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                      EFECTIVO
+                    </Label>
+                    <div className="relative">
+                      <Euro className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        id="efectivo"
+                        readOnly
+                        value={formatCalculatedAmount(cashAmount)}
+                        className={`rounded-lg pl-10 text-right text-lg font-medium ${
+                          isNegativeCash ? 'border-destructive text-destructive' : ''
+                        }`}
+                      />
+                    </div>
+                    {isNegativeCash ? (
+                      <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                        <AlertTriangle className="h-4 w-4" />
+                        TOTAL 不能小于 BBVA 和 CAIXA 的合计。
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              />
 
               <div className="mt-6 rounded-xl bg-secondary p-4">
                 <div className="flex items-center justify-between">
@@ -217,26 +267,31 @@ function SalesEntryPage() {
             </div>
           ) : null}
 
-          <div className="flex gap-3">
-            <Button
-              type="button"
-              variant="secondary"
-              className="flex-1 rounded-lg"
-              disabled={saveSalesMutation.isPending}
-              onClick={() => void form.handleSubmit({ mode: 'draft' })}
-            >
-              <Save className="mr-2 h-4 w-4" />
-              保存草稿
-            </Button>
-            <Button
-              type="submit"
-              className="flex-1 rounded-lg"
-              disabled={saveSalesMutation.isPending}
-            >
-              <CheckCircle className="mr-2 h-4 w-4" />
-              确认提交
-            </Button>
-          </div>
+          <form.Subscribe
+            selector={(state) => isSalesFormSubmittable(state.values)}
+            children={(canSubmitSales) => (
+              <div className="flex gap-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="flex-1 rounded-lg"
+                  disabled={saveSalesMutation.isPending || !canSubmitSales}
+                  onClick={() => void form.handleSubmit({ mode: 'draft' })}
+                >
+                  <Save className="mr-2 h-4 w-4" />
+                  保存草稿
+                </Button>
+                <Button
+                  type="submit"
+                  className="flex-1 rounded-lg"
+                  disabled={saveSalesMutation.isPending || !canSubmitSales}
+                >
+                  <CheckCircle className="mr-2 h-4 w-4" />
+                  确认提交
+                </Button>
+              </div>
+            )}
+          />
           </form>
         </div>
       </div>
@@ -254,27 +309,37 @@ function createSalesEntryPageFallbackData(date = getMadridTodayInputValue()) {
 
 type SalesPersistMode = 'draft' | 'submit'
 
+const salesEntryInputs = [
+  { id: 'total', name: 'TOTAL', color: 'bg-neutral-900' },
+  { id: 'bbva', name: 'BBVA', color: 'bg-blue-500' },
+  { id: 'caixa', name: 'CAIXA', color: 'bg-red-500' },
+] satisfies Array<{
+  id: keyof Pick<SalesFormValues, 'total' | 'bbva' | 'caixa'>
+  name: string
+  color: string
+}>
+
 interface SalesFormValues {
   businessDate: string
+  total: string
   bbva: string
   caixa: string
-  efectivo: string
   notes: string
 }
 
 function createAmountInputs(record: SalesDailyRecord | null) {
   if (!record) {
     return {
+      total: '',
       bbva: '',
       caixa: '',
-      efectivo: '',
     }
   }
 
   return {
+    total: formatAmountInput(record.totalAmount),
     bbva: formatAmountInput(record.bbvaAmount),
     caixa: formatAmountInput(record.caixaAmount),
-    efectivo: formatAmountInput(record.cashAmount),
   }
 }
 
@@ -286,30 +351,35 @@ function createSalesFormValues(
 
   return {
     businessDate,
+    total: amounts.total,
     bbva: amounts.bbva,
     caixa: amounts.caixa,
-    efectivo: amounts.efectivo,
     notes: record?.note ?? '',
   }
 }
 
 function getSalesTotal(values: SalesFormValues) {
-  return [values.bbva, values.caixa, values.efectivo].reduce((sum, value) => {
-    const amount = Number.parseFloat(value) || 0
-    return sum + amount
-  }, 0)
+  return Number.parseFloat(values.total) || 0
 }
 
 function toSalesPayload(values: SalesFormValues): SalesDailyDraftInput {
   return {
     date: values.businessDate,
-    amounts: {
-      bbva: values.bbva,
-      caixa: values.caixa,
-      efectivo: values.efectivo,
-    },
+    amounts: deriveSalesChannelAmounts(values),
     notes: values.notes,
   }
+}
+
+function isSalesFormSubmittable(values: SalesFormValues) {
+  return isCompleteDecimalAmount(values.total) && getDerivedCashAmount(values) >= 0
+}
+
+function formatCalculatedAmount(value: number) {
+  return value.toFixed(2)
+}
+
+function isCompleteDecimalAmount(value: string) {
+  return /^\d+(?:\.\d+)?$/.test(value.trim())
 }
 
 function isDecimalInput(value: string) {

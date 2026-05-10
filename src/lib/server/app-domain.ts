@@ -256,7 +256,7 @@ export function deriveSalesChannelAmounts(
   }
 }
 
-export function getDerivedCashAmount(input: SalesTotalEntryInput) {
+export function getDerivedCashAmount(input: SalesTotalEntryInput): number {
   const totalAmount = parseCurrencyAmount(input.total)
   const bbvaAmount = parseCurrencyAmount(input.bbva)
   const caixaAmount = parseCurrencyAmount(input.caixa)
