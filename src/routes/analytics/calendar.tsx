@@ -31,6 +31,10 @@ function AnalyticsCalendarPage() {
   })
 
   const currentDate = toMonthDate(selectedMonth)
+  const selectedMonthName = currentDate.toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: 'long',
+  })
   const year = currentDate.getFullYear()
   const month = currentDate.getMonth()
   const firstDayOfMonth = new Date(year, month, 1)
@@ -89,7 +93,7 @@ function AnalyticsCalendarPage() {
         <Card className="rounded-xl">
           <CardHeader className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-2">
-              <CardTitle className="text-base">{calendarSummary.monthName}</CardTitle>
+              <CardTitle className="text-base">{selectedMonthName}</CardTitle>
               <YearMonthPicker
                 value={selectedMonth}
                 onChange={setSelectedMonth}
