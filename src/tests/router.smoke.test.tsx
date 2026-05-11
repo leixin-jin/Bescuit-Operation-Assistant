@@ -16,7 +16,8 @@ vi.mock('@/styles/globals.css?url', () => ({
   default: '/test.css',
 }))
 
-vi.mock('@/lib/server/queries/analytics', () => {
+vi.mock('@/lib/server/queries/analytics', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/server/queries/analytics')>()
   const getSelectedMonth = (input?: { data?: { month?: string } }) =>
     input?.data?.month ?? '2026-05'
   const getMonthName = (month: string) => {
@@ -25,6 +26,7 @@ vi.mock('@/lib/server/queries/analytics', () => {
   }
 
   return {
+    ...actual,
     getCalendarAnalyticsSummaryServerFn: analyticsMocks.getCalendarAnalyticsSummaryServerFn.mockImplementation(async (input) => {
       const selectedMonth = getSelectedMonth(input)
 
