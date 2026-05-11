@@ -129,6 +129,22 @@ describe('phase 1-4 smoke tests', () => {
     expect(screen.getByText('本月净利润')).toBeTruthy()
   })
 
+  test('monthly analytics exposes separate year and month selectors', async () => {
+    await renderRoute('/analytics/monthly')
+
+    expect(await screen.findByRole('heading', { name: '数据分析' })).toBeTruthy()
+    expect(screen.getByLabelText('分析年份')).toBeTruthy()
+    expect(screen.getByLabelText('分析月份')).toBeTruthy()
+  })
+
+  test('calendar analytics exposes separate year and month selectors', async () => {
+    await renderRoute('/analytics/calendar')
+
+    expect(await screen.findByRole('heading', { name: '日历概览' })).toBeTruthy()
+    expect(screen.getByLabelText('日历年份')).toBeTruthy()
+    expect(screen.getByLabelText('日历月份')).toBeTruthy()
+  })
+
   test('invoice review workbench renders the split preview and review sections', async () => {
     const job = await createInvoiceJob('smoke-upload.pdf')
 
