@@ -61,17 +61,63 @@ describe('phase 1-4 smoke tests', () => {
     expect(await screen.findByRole('heading', { name: '发票 intake' })).toBeTruthy()
   })
 
-  test('sales entry page recomputes the total when channel amounts change', async () => {
+  test('sales entry page derives efectivo from total minus card channels', async () => {
     await renderRoute('/sales/new')
 
+    fireEvent.change(screen.getByLabelText('TOTAL'), {
+      target: { value: '100' },
+    })
     fireEvent.change(screen.getByLabelText('BBVA'), {
-      target: { value: '10.50' },
+      target: { value: '35.50' },
     })
     fireEvent.change(screen.getByLabelText('CAIXA'), {
       target: { value: '20' },
     })
 
-    expect(screen.getByText('€30.50')).toBeTruthy()
+    expect(screen.getByText('€100.00')).toBeTruthy()
+    expect((screen.getByLabelText('EFECTIVO') as HTMLInputElement).value).toBe(
+      '44.50',
+    )
+  })
+
+  test('sales entry page keeps incomplete decimal totals disabled', async () => {
+    await renderRoute('/sales/new')
+
+    fireEvent.change(screen.getByLabelText('TOTAL'), {
+      target: { value: '.' },
+    })
+
+    expect((screen.getByRole('button', { name: /保存草稿/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    )
+    expect((screen.getByRole('button', { name: /确认提交/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    )
+  })
+
+  test('sales entry page blocks negative efectivo totals', async () => {
+    await renderRoute('/sales/new')
+
+    fireEvent.change(screen.getByLabelText('TOTAL'), {
+      target: { value: '50' },
+    })
+    fireEvent.change(screen.getByLabelText('BBVA'), {
+      target: { value: '40' },
+    })
+    fireEvent.change(screen.getByLabelText('CAIXA'), {
+      target: { value: '20' },
+    })
+
+    expect(screen.getByText('TOTAL 不能小于 BBVA 和 CAIXA 的合计。')).toBeTruthy()
+    expect((screen.getByLabelText('EFECTIVO') as HTMLInputElement).value).toBe(
+      '-10.00',
+    )
+    expect((screen.getByRole('button', { name: /保存草稿/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    )
+    expect((screen.getByRole('button', { name: /确认提交/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    )
   })
 
   test('analytics calendar page renders monthly summary cards', async () => {
