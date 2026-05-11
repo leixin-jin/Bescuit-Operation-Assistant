@@ -27,7 +27,7 @@ export const Route = createFileRoute('/analytics/monthly')({
 function AnalyticsMonthlyPage() {
   const loaderData = Route.useLoaderData() ?? createMonthlySummaryFallback()
   const [selectedMonth, setSelectedMonth] = useState(loaderData.selectedMonth)
-  const { data: analyticsSummary = loaderData } = useQuery({
+  const { data } = useQuery({
     queryKey: ['monthly-analytics', selectedMonth],
     queryFn: async () =>
       (await getMonthlyAnalyticsSummaryServerFn({
@@ -35,6 +35,10 @@ function AnalyticsMonthlyPage() {
       })) ?? createMonthlySummaryFallback(selectedMonth),
     initialData: selectedMonth === loaderData.selectedMonth ? loaderData : undefined,
   })
+  const analyticsSummary =
+    data?.selectedMonth === selectedMonth
+      ? data
+      : createMonthlySummaryFallback(selectedMonth)
 
   return (
     <AppShell>

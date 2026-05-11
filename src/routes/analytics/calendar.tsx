@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { YearMonthPicker } from '@/components/year-month-picker'
 import { shiftMonthKey, toMonthDate } from '@/lib/month-selection'
+import type { CalendarAnalyticsSummary } from '@/lib/server/app-domain'
 import { getCalendarAnalyticsSummaryServerFn } from '@/lib/server/queries/analytics'
 import { cn } from '@/lib/utils'
 
@@ -21,7 +22,7 @@ export const Route = createFileRoute('/analytics/calendar')({
 function AnalyticsCalendarPage() {
   const loaderData = Route.useLoaderData() ?? createCalendarSummaryFallback()
   const [selectedMonth, setSelectedMonth] = useState(loaderData.selectedMonth)
-  const { data: calendarSummary = loaderData } = useQuery({
+  const { data } = useQuery({
     queryKey: ['calendar-analytics', selectedMonth],
     queryFn: async () =>
       (await getCalendarAnalyticsSummaryServerFn({
@@ -29,6 +30,10 @@ function AnalyticsCalendarPage() {
       })) ?? createCalendarSummaryFallback(selectedMonth),
     initialData: selectedMonth === loaderData.selectedMonth ? loaderData : undefined,
   })
+  const calendarSummary =
+    data?.selectedMonth === selectedMonth
+      ? data
+      : createCalendarSummaryFallback(selectedMonth)
 
   const currentDate = toMonthDate(selectedMonth)
   const selectedMonthName = currentDate.toLocaleDateString('zh-CN', {
@@ -206,7 +211,7 @@ function AnalyticsCalendarPage() {
 
 function createCalendarSummaryFallback(
   selectedMonth = getTodayReferenceDate().toISOString().slice(0, 7),
-) {
+): CalendarAnalyticsSummary {
   return {
     selectedMonth,
     monthName: toMonthDate(selectedMonth).toLocaleDateString('zh-CN', {
