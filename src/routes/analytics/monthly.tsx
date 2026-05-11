@@ -12,16 +12,9 @@ import {
 import { AppShell } from '@/components/app-shell'
 import { MetricCard } from '@/components/metric-card'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { YearMonthPicker } from '@/components/year-month-picker'
 import {
   getMadridTodayInputValue,
-  getMonthOptions,
   type MonthlyAnalyticsSummary,
 } from '@/lib/server/app-domain'
 import { getMonthlyAnalyticsSummaryServerFn } from '@/lib/server/queries/analytics'
@@ -34,7 +27,7 @@ export const Route = createFileRoute('/analytics/monthly')({
 function AnalyticsMonthlyPage() {
   const loaderData = Route.useLoaderData() ?? createMonthlySummaryFallback()
   const [selectedMonth, setSelectedMonth] = useState(loaderData.selectedMonth)
-  const { data: analyticsSummary = loaderData } = useQuery({
+  const { data } = useQuery({
     queryKey: ['monthly-analytics', selectedMonth],
     queryFn: async () =>
       (await getMonthlyAnalyticsSummaryServerFn({
@@ -42,6 +35,10 @@ function AnalyticsMonthlyPage() {
       })) ?? createMonthlySummaryFallback(selectedMonth),
     initialData: selectedMonth === loaderData.selectedMonth ? loaderData : undefined,
   })
+  const analyticsSummary =
+    data?.selectedMonth === selectedMonth
+      ? data
+      : createMonthlySummaryFallback(selectedMonth)
 
   return (
     <AppShell>
@@ -58,18 +55,12 @@ function AnalyticsMonthlyPage() {
             <h1 className="text-2xl font-bold">数据分析</h1>
             <p className="mt-1 text-muted-foreground">查看收入与支出的详细分析</p>
           </div>
-          <Select value={selectedMonth} onValueChange={setSelectedMonth}>
-            <SelectTrigger className="w-40 rounded-lg">
-              <SelectValue placeholder="选择月份" />
-            </SelectTrigger>
-            <SelectContent>
-              {analyticsSummary.monthOptions.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <YearMonthPicker
+            value={selectedMonth}
+            onChange={setSelectedMonth}
+            yearLabel="分析年份"
+            monthLabel="分析月份"
+          />
         </div>
 
         <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -241,7 +232,7 @@ function createMonthlySummaryFallback(
 ): MonthlyAnalyticsSummary {
   return {
     selectedMonth,
-    monthOptions: getMonthOptions(selectedMonth),
+    monthOptions: [],
     incomeBreakdown: [
       { name: 'BBVA', value: 0, percentage: 0 },
       { name: 'CAIXA', value: 0, percentage: 0 },

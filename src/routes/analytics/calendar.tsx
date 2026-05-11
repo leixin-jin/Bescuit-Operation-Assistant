@@ -6,8 +6,11 @@ import { ArrowLeft, ChevronLeft, ChevronRight } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { cn } from '@/lib/utils'
+import { YearMonthPicker } from '@/components/year-month-picker'
+import { shiftMonthKey, toMonthDate } from '@/lib/month-selection'
+import type { CalendarAnalyticsSummary } from '@/lib/server/app-domain'
 import { getCalendarAnalyticsSummaryServerFn } from '@/lib/server/queries/analytics'
+import { cn } from '@/lib/utils'
 
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日']
 
@@ -19,7 +22,7 @@ export const Route = createFileRoute('/analytics/calendar')({
 function AnalyticsCalendarPage() {
   const loaderData = Route.useLoaderData() ?? createCalendarSummaryFallback()
   const [selectedMonth, setSelectedMonth] = useState(loaderData.selectedMonth)
-  const { data: calendarSummary = loaderData } = useQuery({
+  const { data } = useQuery({
     queryKey: ['calendar-analytics', selectedMonth],
     queryFn: async () =>
       (await getCalendarAnalyticsSummaryServerFn({
@@ -27,8 +30,16 @@ function AnalyticsCalendarPage() {
       })) ?? createCalendarSummaryFallback(selectedMonth),
     initialData: selectedMonth === loaderData.selectedMonth ? loaderData : undefined,
   })
+  const calendarSummary =
+    data?.selectedMonth === selectedMonth
+      ? data
+      : createCalendarSummaryFallback(selectedMonth)
 
   const currentDate = toMonthDate(selectedMonth)
+  const selectedMonthName = currentDate.toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: 'long',
+  })
   const year = currentDate.getFullYear()
   const month = currentDate.getMonth()
   const firstDayOfMonth = new Date(year, month, 1)
@@ -85,14 +96,22 @@ function AnalyticsCalendarPage() {
         </div>
 
         <Card className="rounded-xl">
-          <CardHeader className="flex flex-row items-center justify-between pb-4">
-            <CardTitle className="text-base">{calendarSummary.monthName}</CardTitle>
+          <CardHeader className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-2">
+              <CardTitle className="text-base">{selectedMonthName}</CardTitle>
+              <YearMonthPicker
+                value={selectedMonth}
+                onChange={setSelectedMonth}
+                yearLabel="日历年份"
+                monthLabel="日历月份"
+              />
+            </div>
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
                 size="icon"
                 className="h-8 w-8 rounded-lg"
-                onClick={() => setSelectedMonth(shiftMonth(selectedMonth, -1))}
+                onClick={() => setSelectedMonth(shiftMonthKey(selectedMonth, -1))}
               >
                 <ChevronLeft className="h-4 w-4" />
               </Button>
@@ -108,7 +127,7 @@ function AnalyticsCalendarPage() {
                 variant="outline"
                 size="icon"
                 className="h-8 w-8 rounded-lg"
-                onClick={() => setSelectedMonth(shiftMonth(selectedMonth, 1))}
+                onClick={() => setSelectedMonth(shiftMonthKey(selectedMonth, 1))}
               >
                 <ChevronRight className="h-4 w-4" />
               </Button>
@@ -192,8 +211,7 @@ function AnalyticsCalendarPage() {
 
 function createCalendarSummaryFallback(
   selectedMonth = getTodayReferenceDate().toISOString().slice(0, 7),
-) {
-
+): CalendarAnalyticsSummary {
   return {
     selectedMonth,
     monthName: toMonthDate(selectedMonth).toLocaleDateString('zh-CN', {
@@ -205,17 +223,6 @@ function createCalendarSummaryFallback(
     totalIncome: 0,
     totalExpense: 0,
   }
-}
-
-function shiftMonth(month: string, offset: number) {
-  const date = toMonthDate(month)
-  date.setMonth(date.getMonth() + offset)
-  return date.toISOString().slice(0, 7)
-}
-
-function toMonthDate(month: string) {
-  const [year, monthNumber] = month.split('-').map((value) => Number.parseInt(value, 10))
-  return new Date(year, monthNumber - 1, 1, 12)
 }
 
 function getTodayReferenceDate() {

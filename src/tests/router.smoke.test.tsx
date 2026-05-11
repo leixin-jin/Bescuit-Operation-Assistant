@@ -7,8 +7,89 @@ import { describe, expect, test, vi } from 'vitest'
 import { createInvoiceJob } from '@/features/invoices/mock-store'
 import { routeTree } from '@/routeTree.gen'
 
+const analyticsMocks = vi.hoisted(() => ({
+  getCalendarAnalyticsSummaryServerFn: vi.fn(),
+  getMonthlyAnalyticsSummaryServerFn: vi.fn(),
+}))
+
 vi.mock('@/styles/globals.css?url', () => ({
   default: '/test.css',
+}))
+
+vi.mock('@/lib/server/queries/analytics', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/server/queries/analytics')>()
+  const getSelectedMonth = (input?: { data?: { month?: string } }) =>
+    input?.data?.month ?? '2026-05'
+  const getMonthName = (month: string) => {
+    const [year, monthNumber] = month.split('-')
+    return `${year}年${Number.parseInt(monthNumber, 10)}月`
+  }
+
+  return {
+    ...actual,
+    getCalendarAnalyticsSummaryServerFn: analyticsMocks.getCalendarAnalyticsSummaryServerFn.mockImplementation(async (input) => {
+      const selectedMonth = getSelectedMonth(input)
+
+      return {
+        selectedMonth,
+        monthName: `日历标题 ${getMonthName(selectedMonth)}`,
+        monthOptions: [],
+        days: {},
+        totalIncome: 0,
+        totalExpense: 0,
+      }
+    }),
+    getMonthlyAnalyticsSummaryServerFn: analyticsMocks.getMonthlyAnalyticsSummaryServerFn.mockImplementation(async (input) => {
+      const selectedMonth = getSelectedMonth(input)
+
+      return {
+        selectedMonth,
+        monthOptions: [],
+        incomeBreakdown: [
+          { name: 'BBVA', value: 0, percentage: 0 },
+          { name: 'CAIXA', value: 0, percentage: 0 },
+          { name: 'EFECTIVO', value: 0, percentage: 0 },
+        ],
+        expenseBreakdown: [],
+        weeklyTrend: [],
+        totalIncome: 0,
+        totalExpense: 0,
+        totalNet: 0,
+        profitMargin: 0,
+        incomeTrend: 0,
+        expenseTrend: 0,
+        netTrend: 0,
+        marginDelta: 0,
+      }
+    }),
+  }
+})
+
+vi.mock('@/components/year-month-picker', () => ({
+  YearMonthPicker: ({
+    value,
+    onChange,
+    yearLabel,
+    monthLabel,
+  }: {
+    value: string
+    onChange: (monthKey: string) => void
+    yearLabel: string
+    monthLabel: string
+  }) => {
+    const [year, month] = value.split('-')
+
+    return (
+      <div>
+        <button type="button" aria-label={yearLabel}>
+          {year}年
+        </button>
+        <button type="button" aria-label={monthLabel} onClick={() => onChange(`${year}-04`)}>
+          {Number.parseInt(month, 10)}月
+        </button>
+      </div>
+    )
+  },
 }))
 
 async function renderRoute(initialPath = '/') {
@@ -48,7 +129,7 @@ describe('phase 1-4 smoke tests', () => {
       expect(router.state.location.pathname).toBe('/analytics/calendar')
     })
 
-    expect(await screen.findByRole('heading', { name: '日历概览' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '日历概览' })).toBeTruthy()
   })
 
   test('legacy /invoices/review redirects to /invoices/new', async () => {
@@ -123,10 +204,50 @@ describe('phase 1-4 smoke tests', () => {
   test('analytics calendar page renders monthly summary cards', async () => {
     await renderRoute('/analytics/calendar')
 
-    expect(await screen.findByRole('heading', { name: '日历概览' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '日历概览' })).toBeTruthy()
     expect(screen.getByText('本月总收入')).toBeTruthy()
     expect(screen.getByText('本月总支出')).toBeTruthy()
     expect(screen.getByText('本月净利润')).toBeTruthy()
+  })
+
+  test('monthly analytics exposes separate year and month selectors', async () => {
+    await renderRoute('/analytics/monthly')
+
+    expect(screen.getByRole('heading', { name: '数据分析' })).toBeTruthy()
+    expect(screen.getByLabelText('分析年份')).toBeTruthy()
+    expect(screen.getByLabelText('分析月份')).toBeTruthy()
+  })
+
+  test('calendar analytics exposes separate year and month selectors', async () => {
+    await renderRoute('/analytics/calendar')
+
+    expect(screen.getByRole('heading', { name: '日历概览' })).toBeTruthy()
+    expect(screen.getByLabelText('日历年份')).toBeTruthy()
+    expect(screen.getByLabelText('日历月份')).toBeTruthy()
+  })
+
+  test('calendar month selector updates the visible month title', async () => {
+    await renderRoute('/analytics/calendar')
+
+    fireEvent.click(screen.getByLabelText('日历月份'))
+    await waitFor(() => {
+      expect(screen.getByText('2026年4月')).toBeTruthy()
+      expect(analyticsMocks.getCalendarAnalyticsSummaryServerFn).toHaveBeenCalledWith({
+        data: { month: '2026-04' },
+      })
+    })
+  })
+
+  test('monthly analytics month selector can select a specific month', async () => {
+    await renderRoute('/analytics/monthly')
+
+    fireEvent.click(screen.getByLabelText('分析月份'))
+    await waitFor(() => {
+      expect(screen.getByLabelText('分析月份').textContent).toContain('4月')
+      expect(analyticsMocks.getMonthlyAnalyticsSummaryServerFn).toHaveBeenCalledWith({
+        data: { month: '2026-04' },
+      })
+    })
   })
 
   test('invoice review workbench renders the split preview and review sections', async () => {
