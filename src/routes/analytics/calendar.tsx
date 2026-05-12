@@ -5,7 +5,7 @@ import { ArrowLeft, ChevronLeft, ChevronRight } from 'lucide-react'
 
 import { AppShell } from '@/components/app-shell'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { YearMonthPicker } from '@/components/year-month-picker'
 import { shiftMonthKey, toMonthDate } from '@/lib/month-selection'
 import type { CalendarAnalyticsSummary } from '@/lib/server/app-domain'
@@ -36,10 +36,6 @@ function AnalyticsCalendarPage() {
       : createCalendarSummaryFallback(selectedMonth)
 
   const currentDate = toMonthDate(selectedMonth)
-  const selectedMonthName = currentDate.toLocaleDateString('zh-CN', {
-    year: 'numeric',
-    month: 'long',
-  })
   const year = currentDate.getFullYear()
   const month = currentDate.getMonth()
   const firstDayOfMonth = new Date(year, month, 1)
@@ -96,9 +92,8 @@ function AnalyticsCalendarPage() {
         </div>
 
         <Card className="rounded-xl">
-          <CardHeader className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-2">
-              <CardTitle className="text-base">{selectedMonthName}</CardTitle>
+          <CardHeader className="flex flex-col gap-3 pb-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
               <YearMonthPicker
                 value={selectedMonth}
                 onChange={setSelectedMonth}
@@ -133,12 +128,12 @@ function AnalyticsCalendarPage() {
               </Button>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="pt-0">
             <div className="mb-2 grid grid-cols-7 gap-1">
               {WEEKDAYS.map((day) => (
                 <div
                   key={day}
-                  className="py-2 text-center text-xs font-medium text-muted-foreground"
+                  className="py-1.5 text-center text-sm font-medium text-muted-foreground"
                 >
                   {day}
                 </div>
@@ -147,7 +142,7 @@ function AnalyticsCalendarPage() {
 
             <div className="grid grid-cols-7 gap-1">
               {Array.from({ length: startDay }).map((_, index) => (
-                <div key={`empty-${index}`} className="aspect-square p-1" />
+                <div key={`empty-${index}`} className="h-14 p-1 sm:h-16 xl:h-[4.5rem]" />
               ))}
 
               {Array.from({ length: daysInMonth }).map((_, index) => {
@@ -162,25 +157,25 @@ function AnalyticsCalendarPage() {
                   <div
                     key={day}
                     className={cn(
-                      'aspect-square cursor-pointer rounded-lg border border-transparent p-1 transition-colors hover:border-primary/20 hover:bg-secondary/50',
+                      'h-14 cursor-pointer rounded-lg border border-transparent p-1.5 transition-colors hover:border-primary/20 hover:bg-secondary/50 sm:h-16 xl:h-[4.5rem]',
                       isToday && 'border-primary bg-primary/5',
                     )}
                   >
-                    <div className="flex h-full flex-col">
-                      <span className={cn('text-xs font-medium', isToday && 'text-primary')}>
+                    <div className="grid h-full grid-cols-[1.5rem_minmax(0,1fr)] gap-1">
+                      <span className={cn('text-sm font-semibold', isToday && 'text-primary')}>
                         {day}
                       </span>
                       {dayData ? (
-                        <div className="mt-auto space-y-0.5">
-                          <div className="flex items-center gap-1">
-                            <span className="h-1 w-1 rounded-full bg-emerald-500" />
-                            <span className="truncate text-[10px] text-emerald-600">
+                        <div className="min-w-0 space-y-0.5 justify-self-end text-right leading-tight">
+                          <div className="flex min-w-0 items-center justify-end gap-1">
+                            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
+                            <span className="truncate text-xs text-emerald-600">
                               {dayData.income}
                             </span>
                           </div>
-                          <div className="flex items-center gap-1">
-                            <span className="h-1 w-1 rounded-full bg-red-400" />
-                            <span className="truncate text-[10px] text-red-500">
+                          <div className="flex min-w-0 items-center justify-end gap-1">
+                            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-400" />
+                            <span className="truncate text-xs text-red-500">
                               {dayData.expense}
                             </span>
                           </div>
