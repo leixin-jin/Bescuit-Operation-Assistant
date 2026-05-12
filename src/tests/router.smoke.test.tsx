@@ -224,14 +224,15 @@ describe('phase 1-4 smoke tests', () => {
     expect(screen.getByRole('heading', { name: '日历概览' })).toBeTruthy()
     expect(screen.getByLabelText('日历年份')).toBeTruthy()
     expect(screen.getByLabelText('日历月份')).toBeTruthy()
+    expect(screen.queryByText('日历标题 2026年5月')).toBeNull()
   })
 
-  test('calendar month selector updates the visible month title', async () => {
+  test('calendar month selector updates the selected month', async () => {
     await renderRoute('/analytics/calendar')
 
     fireEvent.click(screen.getByLabelText('日历月份'))
     await waitFor(() => {
-      expect(screen.getByText('2026年4月')).toBeTruthy()
+      expect(screen.getByLabelText('日历月份').textContent).toContain('4月')
       expect(analyticsMocks.getCalendarAnalyticsSummaryServerFn).toHaveBeenCalledWith({
         data: { month: '2026-04' },
       })
