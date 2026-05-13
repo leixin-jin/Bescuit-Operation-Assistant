@@ -30,6 +30,10 @@ interface IntakeSourceRow {
   sourceDocumentId: string
 }
 
+interface IntakeStageRow {
+  stage: string
+}
+
 interface DeletableIntakeJobRow {
   jobId: string
   stage: string
@@ -246,6 +250,7 @@ async function persistInvoiceReviewDraft(
   }
   const latestExtraction = await getLatestExtractionRow(db, job.jobId)
   const now = new Date().toISOString()
+  await assertInvoiceReviewDraftWritable(db, job.jobId)
 
   if (latestExtraction) {
     await db
@@ -506,6 +511,22 @@ async function getSourceDocumentId(db: D1Database, jobId: string) {
   }
 
   return sourceDocumentId
+}
+
+async function assertInvoiceReviewDraftWritable(db: D1Database, jobId: string) {
+  const rows = await allD1<IntakeStageRow>(
+    db,
+    `/* invoice:review-draft-stage */
+    SELECT stage
+    FROM intake_jobs
+    WHERE id = ?
+    LIMIT 1`,
+    [jobId],
+  )
+
+  if (rows[0]?.stage === 'deleting') {
+    throw new Error('发票任务正在删除，不能保存或确认。')
+  }
 }
 
 function calculateLineTotal(quantity: string, unitPrice: string) {

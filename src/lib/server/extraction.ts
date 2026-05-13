@@ -301,6 +301,11 @@ export async function processInvoiceIntakeQueueMessage(
     const provider = selectInvoiceExtractionProvider(env)
     const extraction = await provider.extract(providerInput)
     const extractionDraft = extraction.draft
+    const currentStage = await getCurrentQueueStage(db, message.jobId)
+
+    if (currentStage.stage !== 'extracting') {
+      return currentStage
+    }
 
     const extractionStoredAt = new Date().toISOString()
     const schemaVersion =
