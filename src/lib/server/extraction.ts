@@ -1,7 +1,7 @@
 import { and, eq } from 'drizzle-orm'
 
 import { getDb } from '@/lib/db/client'
-import { extractionResults, intakeJobs, sourceDocuments } from '@/lib/db/schema'
+import { intakeJobs } from '@/lib/db/schema'
 import {
   getMadridTodayInputValue,
   type InvoiceHeaderDraft,
@@ -311,7 +311,7 @@ export async function processInvoiceIntakeQueueMessage(
     const schemaVersion =
       extractionDraft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION
 
-    const extractionResult = await env.DB.prepare(
+    const extractionResult = await db.$client.prepare(
       `/* invoice:queue-upsert-extraction */
       INSERT INTO extraction_results (
         id,
@@ -371,7 +371,7 @@ export async function processInvoiceIntakeQueueMessage(
       return getCurrentQueueStage(db, message.jobId)
     }
 
-    const sourceProcessedResult = await env.DB.prepare(
+    const sourceProcessedResult = await db.$client.prepare(
       `/* invoice:queue-source-processed */
       UPDATE source_documents
       SET status = 'processed'
@@ -417,7 +417,7 @@ export async function processInvoiceIntakeQueueMessage(
       throw error
     }
 
-    const sourceErrorResult = await env.DB.prepare(
+    const sourceErrorResult = await db.$client.prepare(
       `/* invoice:queue-source-error */
       UPDATE source_documents
       SET status = 'error'

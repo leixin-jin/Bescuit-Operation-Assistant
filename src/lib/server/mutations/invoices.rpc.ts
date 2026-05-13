@@ -178,8 +178,14 @@ export async function deleteInvoiceIntakeJobFromDatabase(
   }
 
   if (row.r2Key) {
+    const documentsBucket = rawDocumentsBucket
+
+    if (!documentsBucket) {
+      throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
+    }
+
     try {
-      await rawDocumentsBucket.delete(row.r2Key)
+      await documentsBucket.delete(row.r2Key)
     } catch (error) {
       await db
         .prepare(

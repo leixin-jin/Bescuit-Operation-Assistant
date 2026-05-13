@@ -53,7 +53,7 @@ describe('invoice extraction helpers', () => {
       provider: 'gemini',
       model: 'gemini-3.1-flash-lite',
     }
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       new Response(
         JSON.stringify({
           candidates: [
