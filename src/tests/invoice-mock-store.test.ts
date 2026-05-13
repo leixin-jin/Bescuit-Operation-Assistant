@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, test } from 'vitest'
 
 import {
   createInvoiceJob,
+  deleteInvoiceJob,
   getInvoiceJob,
   getInvoiceReadinessSummary,
   listInvoiceJobs,
@@ -114,5 +115,47 @@ describe('invoice mock store', () => {
     expect(getInvoiceReadinessSummary(storedJob!).invalidHeaderFields).toEqual([
       '税额',
     ])
+  })
+
+  test('unfinished jobs can be deleted from the browser session store', async () => {
+    const createdJob = await createInvoiceJob('delete-me.pdf')
+
+    await expect(deleteInvoiceJob(createdJob.jobId)).resolves.toEqual({
+      ok: true,
+      deleted: true,
+    })
+
+    expect(await getInvoiceJob(createdJob.jobId)).toBeNull()
+    expect((await listInvoiceJobs()).map((job) => job.jobId)).not.toContain(
+      createdJob.jobId,
+    )
+  })
+
+  test('ready jobs cannot be deleted from the browser session store', async () => {
+    const createdJob = await createInvoiceJob('ready.pdf')
+    await saveInvoiceJob({
+      ...createdJob,
+      stage: 'ready',
+      status: 'ready',
+      header: {
+        supplier: 'Makro Madrid',
+        invoiceNo: 'MK-889120',
+        date: '2026-04-24',
+        totalAmount: '248.90',
+        taxAmount: '34.56',
+        notes: '',
+      },
+      lineItems: createdJob.lineItems.map((item) => ({
+        ...item,
+        ingredient: 'coke-330',
+        matched: true,
+        unitPrice: '1.50',
+      })),
+    })
+
+    await expect(deleteInvoiceJob(createdJob.jobId)).rejects.toThrow(
+      /已完成|cannot delete/i,
+    )
+    expect(await getInvoiceJob(createdJob.jobId)).not.toBeNull()
   })
 })

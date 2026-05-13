@@ -12,6 +12,7 @@ import {
   getInvoiceReadinessSummary,
   getMadridTodayInputValue,
   getMonthOptions,
+  isInvoiceJobDeletable,
   normalizeSalesDraftInput,
   parseCurrencyAmount,
   roundCurrency,
@@ -19,6 +20,8 @@ import {
 
 const SALES_STORAGE_KEY = 'bescuit-operation-assistant:sales-daily'
 const INVOICE_SESSION_STORAGE_KEY = 'bescuit-operation-assistant:invoice-jobs'
+const INVOICE_DELETED_SESSION_STORAGE_KEY =
+  'bescuit-operation-assistant:deleted-invoice-jobs'
 
 export { getInvoiceReadinessSummary, getMonthOptions }
 
@@ -58,11 +61,18 @@ export function upsertStoredSalesRecord(
 }
 
 export function listStoredInvoiceJobs() {
+  const deletedJobIds = readDeletedInvoiceJobIds()
   const jobMap = new Map(
-    getSeedInvoiceJobs().map((job) => [job.jobId, cloneInvoiceJob(job)]),
+    getSeedInvoiceJobs()
+      .filter((job) => !deletedJobIds.has(job.jobId))
+      .map((job) => [job.jobId, cloneInvoiceJob(job)]),
   )
 
   for (const storedJob of readStoredInvoiceJobs()) {
+    if (deletedJobIds.has(storedJob.jobId)) {
+      continue
+    }
+
     jobMap.set(storedJob.jobId, cloneInvoiceJob(normalizeInvoiceJob(storedJob)))
   }
 
@@ -129,6 +139,28 @@ export function upsertStoredInvoiceJob(job: InvoiceReviewJob) {
   storedJobs.push(normalizedJob)
   persistStoredInvoiceJobs(storedJobs)
   return cloneInvoiceJob(normalizedJob)
+}
+
+export function deleteStoredInvoiceJob(jobId: string) {
+  const job = listStoredInvoiceJobs().find((candidate) => candidate.jobId === jobId)
+  if (!job) {
+    return { ok: true, deleted: false }
+  }
+
+  if (!isInvoiceJobDeletable(job)) {
+    throw new Error('已完成的发票任务不能从最近任务中删除。')
+  }
+
+  const storedJobs = readStoredInvoiceJobs().filter(
+    (storedJob) => storedJob.jobId !== jobId,
+  )
+  persistStoredInvoiceJobs(storedJobs)
+
+  const deletedJobIds = readDeletedInvoiceJobIds()
+  deletedJobIds.add(jobId)
+  persistDeletedInvoiceJobIds(deletedJobIds)
+
+  return { ok: true, deleted: true }
 }
 
 export function getCalendarMonthBase(month: string) {
@@ -237,6 +269,42 @@ function persistStoredInvoiceJobs(jobs: InvoiceReviewJob[]) {
   window.sessionStorage.setItem(
     INVOICE_SESSION_STORAGE_KEY,
     JSON.stringify(jobs.map(cloneInvoiceJob)),
+  )
+}
+
+function readDeletedInvoiceJobIds() {
+  if (!canUseSessionStorage()) {
+    return new Set<string>()
+  }
+
+  const rawValue = window.sessionStorage.getItem(INVOICE_DELETED_SESSION_STORAGE_KEY)
+  if (!rawValue) {
+    return new Set<string>()
+  }
+
+  try {
+    const parsedValue = JSON.parse(rawValue)
+    if (!Array.isArray(parsedValue)) {
+      return new Set<string>()
+    }
+
+    return new Set(
+      parsedValue.filter((value): value is string => typeof value === 'string'),
+    )
+  } catch {
+    window.sessionStorage.removeItem(INVOICE_DELETED_SESSION_STORAGE_KEY)
+    return new Set<string>()
+  }
+}
+
+function persistDeletedInvoiceJobIds(jobIds: Set<string>) {
+  if (!canUseSessionStorage()) {
+    return
+  }
+
+  window.sessionStorage.setItem(
+    INVOICE_DELETED_SESSION_STORAGE_KEY,
+    JSON.stringify(Array.from(jobIds)),
   )
 }
 

@@ -220,6 +220,12 @@ export function isInvoiceJobProcessing(
   return stage === 'queued' || stage === 'extracting'
 }
 
+export function isInvoiceJobDeletable(
+  job: Pick<InvoiceReviewJob, 'stage' | 'status'>,
+) {
+  return getInvoiceJobStage(job) !== 'ready'
+}
+
 export function normalizeSalesDraftInput(
   input: SalesDailyDraftInput,
   status: SalesRecordStatus,
