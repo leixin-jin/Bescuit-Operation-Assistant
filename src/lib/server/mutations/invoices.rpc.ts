@@ -5,6 +5,7 @@ import { getServerEnv, type AppBindings } from '@/lib/server/bindings'
 import { allD1, requireD1Database } from '@/lib/server/d1'
 import {
   getInvoiceReadinessSummary,
+  isInvoiceJobDeletable,
   parseCurrencyAmount,
   parseOptionalCurrencyAmount,
   roundCurrency,
@@ -27,6 +28,13 @@ interface LatestExtractionRow {
 
 interface IntakeSourceRow {
   sourceDocumentId: string
+}
+
+interface DeletableIntakeJobRow {
+  jobId: string
+  stage: string
+  sourceDocumentId: string
+  r2Key: string | null
 }
 
 export const uploadInvoiceIntakeDocument = createServerFn({ method: 'POST' })
@@ -57,6 +65,18 @@ export const uploadInvoiceIntakeDocument = createServerFn({ method: 'POST' })
       uploadedBy,
     })
   })
+
+export const deleteInvoiceIntakeJobServerFn = createServerFn({ method: 'POST' })
+  .inputValidator((data: { jobId: string }) => {
+    if (!data.jobId.trim()) {
+      throw new Error('Expected invoice intake job id')
+    }
+
+    return { jobId: data.jobId.trim() }
+  })
+  .handler(async ({ data, context }) =>
+    deleteInvoiceIntakeJobFromDatabase(getServerEnv(context), data.jobId),
+  )
 
 export const saveInvoiceReviewJobServerFn = createServerFn({ method: 'POST' })
   .inputValidator((data: { job: InvoiceReviewJob }) => data)
@@ -93,6 +113,91 @@ export async function confirmInvoiceReviewJobInDatabase(
     ok: true,
     job: savedJob,
     readinessSummary,
+  }
+}
+
+export async function deleteInvoiceIntakeJobFromDatabase(
+  env: Partial<AppBindings> | null | undefined,
+  jobId: string,
+) {
+  const db = requireD1Database(env, 'invoice intake delete')
+  const [row] = await allD1<DeletableIntakeJobRow>(
+    db,
+    `/* invoice:delete-intake-load */
+    SELECT
+      intake_jobs.id AS jobId,
+      intake_jobs.stage AS stage,
+      source_documents.id AS sourceDocumentId,
+      source_documents.r2_key AS r2Key
+    FROM intake_jobs
+    INNER JOIN source_documents
+      ON source_documents.id = intake_jobs.source_document_id
+    WHERE intake_jobs.id = ?
+    LIMIT 1`,
+    [jobId],
+  )
+
+  if (!row) {
+    return {
+      ok: true,
+      deleted: false,
+    }
+  }
+
+  if (
+    !isInvoiceJobDeletable({
+      stage: row.stage as InvoiceReviewJob['stage'],
+      status: row.stage === 'ready' ? 'ready' : 'needs_review',
+    })
+  ) {
+    throw new Error('已完成的发票任务不能从最近任务中删除。')
+  }
+
+  const rawDocumentsBucket = env?.RAW_DOCUMENTS
+
+  if (row.r2Key && !rawDocumentsBucket) {
+    throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
+  }
+
+  if (row.r2Key) {
+    await rawDocumentsBucket.delete(row.r2Key)
+  }
+
+  const statements: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `/* invoice:delete-extractions */
+        DELETE FROM extraction_results
+        WHERE intake_job_id = ?`,
+      )
+      .bind(row.jobId),
+    db
+      .prepare(
+        `/* invoice:delete-intake-job */
+        DELETE FROM intake_jobs
+        WHERE id = ?`,
+      )
+      .bind(row.jobId),
+    db
+      .prepare(
+        `/* invoice:delete-source-document */
+        DELETE FROM source_documents
+        WHERE id = ?`,
+      )
+      .bind(row.sourceDocumentId),
+  ]
+
+  if (typeof db.batch === 'function') {
+    await db.batch(statements)
+  } else {
+    for (const statement of statements) {
+      await statement.run()
+    }
+  }
+
+  return {
+    ok: true,
+    deleted: true,
   }
 }
 

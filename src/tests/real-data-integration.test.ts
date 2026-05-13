@@ -20,7 +20,11 @@ import {
   saveSalesDraftToDatabase,
   submitSalesEntryToDatabase,
 } from '@/lib/server/mutations/sales'
-import { confirmInvoiceReviewJobInDatabase } from '@/lib/server/mutations/invoices.rpc'
+import {
+  confirmInvoiceReviewJobInDatabase,
+  deleteInvoiceIntakeJobFromDatabase,
+} from '@/lib/server/mutations/invoices.rpc'
+import { processInvoiceIntakeQueueMessage } from '@/lib/server/extraction'
 import { assertDemoDataEnabled } from '@/lib/server/runtime-config'
 
 describe('real data integration boundaries', () => {
@@ -358,6 +362,103 @@ describe('invoice review D1 integration', () => {
       source_id: tables.invoices[0]?.id,
     })
   })
+
+  test('deleting an unfinished intake job deletes extraction rows, D1 records, and the R2 object', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-delete',
+          r2_key: 'raw-documents/2026/04/src-delete-invoice.pdf',
+          original_filename: 'delete-me.pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-delete',
+          source_document_id: 'src-delete',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        {
+          id: 'ext-delete',
+          intake_job_id: 'job-delete',
+          markdown_text: 'markdown',
+          structured_json: null,
+          raw_response: null,
+          schema_version: 'invoice-extraction-v1',
+          created_at: '2026-04-27T10:00:00.000Z',
+        },
+      ],
+    })
+    const r2 = createFakeR2Bucket({
+      'raw-documents/2026/04/src-delete-invoice.pdf': {
+        body: '%PDF-delete-me',
+        contentType: 'application/pdf',
+      },
+    })
+    env.RAW_DOCUMENTS = r2
+
+    await expect(deleteInvoiceIntakeJobFromDatabase(env, 'job-delete')).resolves.toEqual({
+      ok: true,
+      deleted: true,
+    })
+
+    expect(tables.extraction_results).toHaveLength(0)
+    expect(tables.intake_jobs).toHaveLength(0)
+    expect(tables.source_documents).toHaveLength(0)
+    await expect(
+      env.RAW_DOCUMENTS.get('raw-documents/2026/04/src-delete-invoice.pdf'),
+    ).resolves.toBeNull()
+  })
+
+  test('deleting a ready intake job is rejected before D1 or R2 is mutated', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [createSourceDocumentRow({ id: 'src-ready' })],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-ready',
+          source_document_id: 'src-ready',
+          stage: 'ready',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-1-invoice.pdf': {
+        body: '%PDF-ready',
+        contentType: 'application/pdf',
+      },
+    })
+
+    await expect(deleteInvoiceIntakeJobFromDatabase(env, 'job-ready')).rejects.toThrow(
+      /已完成|cannot delete/i,
+    )
+
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.source_documents).toHaveLength(1)
+    await expect(
+      env.RAW_DOCUMENTS.get('raw-documents/2026/04/src-1-invoice.pdf'),
+    ).resolves.not.toBeNull()
+  })
+
+  test('queue processing treats a deleted intake job as an idempotent no-op', async () => {
+    const { env } = createFakeD1Env()
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+
+    await expect(
+      processInvoiceIntakeQueueMessage(env, {
+        jobId: 'job-already-deleted',
+        sourceDocumentId: 'src-already-deleted',
+        r2Key: 'raw-documents/2026/04/deleted.pdf',
+        fileName: 'deleted.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      }),
+    ).resolves.toEqual({
+      jobId: 'job-already-deleted',
+      stage: 'deleted',
+    })
+  })
 })
 
 interface FakeTables {
@@ -549,6 +650,10 @@ class FakeD1PreparedStatement {
     }
   }
 
+  async raw() {
+    return this.selectRows().map((row) => Object.values(row))
+  }
+
   private selectRows() {
     const sql = this.sql
 
@@ -655,6 +760,31 @@ class FakeD1PreparedStatement {
       const [jobId] = this.params
       const job = this.tables.intake_jobs.find((row) => row.id === jobId)
       return job ? [{ sourceDocumentId: job.source_document_id }] : []
+    }
+
+    if (sql.includes('select "stage"') && sql.includes('from "intake_jobs"')) {
+      const [jobId] = this.params
+      const job = this.tables.intake_jobs.find((row) => row.id === jobId)
+      return job ? [{ stage: job.stage }] : []
+    }
+
+    if (sql.includes('invoice:delete-intake-load')) {
+      const [jobId] = this.params
+      const job = this.tables.intake_jobs.find((row) => row.id === jobId)
+      const sourceDocument = this.tables.source_documents.find(
+        (row) => row.id === job?.source_document_id,
+      )
+
+      return job && sourceDocument
+        ? [
+            {
+              jobId: job.id,
+              stage: job.stage,
+              sourceDocumentId: sourceDocument.id,
+              r2Key: sourceDocument.r2_key,
+            },
+          ]
+        : []
     }
 
     if (sql.includes('invoice:latest-extraction')) {
@@ -767,6 +897,30 @@ class FakeD1PreparedStatement {
         row.error_message = null
         row.updated_at = String(updatedAt)
       }
+      return
+    }
+
+    if (sql.includes('invoice:delete-extractions')) {
+      const [jobId] = this.params
+      this.tables.extraction_results = this.tables.extraction_results.filter(
+        (row) => row.intake_job_id !== jobId,
+      )
+      return
+    }
+
+    if (sql.includes('invoice:delete-intake-job')) {
+      const [jobId] = this.params
+      this.tables.intake_jobs = this.tables.intake_jobs.filter(
+        (row) => row.id !== jobId,
+      )
+      return
+    }
+
+    if (sql.includes('invoice:delete-source-document')) {
+      const [sourceDocumentId] = this.params
+      this.tables.source_documents = this.tables.source_documents.filter(
+        (row) => row.id !== sourceDocumentId,
+      )
       return
     }
 
@@ -1033,9 +1187,11 @@ function createReadyReviewJob(): InvoiceReviewJob {
 function createFakeR2Bucket(
   objects: Record<string, { body: string; contentType: string }>,
 ) {
+  const objectMap = new Map(Object.entries(objects))
+
   return {
     get: async (key: string) => {
-      const object = objects[key]
+      const object = objectMap.get(key)
 
       if (!object) {
         return null
@@ -1048,6 +1204,9 @@ function createFakeR2Bucket(
         body: object.body,
         arrayBuffer: async () => new TextEncoder().encode(object.body).buffer,
       }
+    },
+    delete: async (key: string) => {
+      objectMap.delete(key)
     },
   } as unknown as R2Bucket
 }

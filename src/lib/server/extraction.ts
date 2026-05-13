@@ -254,7 +254,10 @@ export async function processInvoiceIntakeQueueMessage(
     .limit(1)
 
   if (!jobRow) {
-    throw new Error(`Intake job not found: ${message.jobId}`)
+    return {
+      jobId: message.jobId,
+      stage: 'deleted',
+    }
   }
 
   if (isTerminalIntakeStage(jobRow.stage)) {
