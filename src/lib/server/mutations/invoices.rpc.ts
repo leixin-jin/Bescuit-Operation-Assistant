@@ -159,8 +159,35 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
   }
 
+  const claimResult = await db
+    .prepare(
+      `/* invoice:delete-intake-claim */
+      UPDATE intake_jobs
+      SET stage = 'deleting'
+      WHERE id = ? AND stage != 'ready'`,
+    )
+    .bind(row.jobId)
+    .run()
+
+  if ((claimResult.meta?.changes ?? 0) === 0) {
+    throw new Error('已完成的发票任务不能从最近任务中删除。')
+  }
+
   if (row.r2Key) {
-    await rawDocumentsBucket.delete(row.r2Key)
+    try {
+      await rawDocumentsBucket.delete(row.r2Key)
+    } catch (error) {
+      await db
+        .prepare(
+          `/* invoice:delete-intake-restore */
+          UPDATE intake_jobs
+          SET stage = ?
+          WHERE id = ? AND stage = 'deleting'`,
+        )
+        .bind(row.stage, row.jobId)
+        .run()
+      throw error
+    }
   }
 
   const statements: D1PreparedStatement[] = [
@@ -175,7 +202,7 @@ export async function deleteInvoiceIntakeJobFromDatabase(
       .prepare(
         `/* invoice:delete-intake-job */
         DELETE FROM intake_jobs
-        WHERE id = ?`,
+        WHERE id = ? AND stage = 'deleting'`,
       )
       .bind(row.jobId),
     db

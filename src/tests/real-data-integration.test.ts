@@ -441,6 +441,62 @@ describe('invoice review D1 integration', () => {
     ).resolves.not.toBeNull()
   })
 
+  test('deleting an intake job rejects if it becomes ready before deletion is claimed', async () => {
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [
+          createSourceDocumentRow({
+            id: 'src-race',
+            r2_key: 'raw-documents/2026/04/src-race-invoice.pdf',
+          }),
+        ],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-race',
+            source_document_id: 'src-race',
+            stage: 'needs_review',
+          }),
+        ],
+        extraction_results: [
+          {
+            id: 'ext-race',
+            intake_job_id: 'job-race',
+            markdown_text: 'markdown',
+            structured_json: null,
+            raw_response: null,
+            schema_version: 'invoice-extraction-v1',
+            created_at: '2026-04-27T10:00:00.000Z',
+          },
+        ],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (sql.includes('invoice:delete-intake-claim')) {
+            currentTables.intake_jobs[0].stage = 'ready'
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-race-invoice.pdf': {
+        body: '%PDF-race',
+        contentType: 'application/pdf',
+      },
+    })
+
+    await expect(deleteInvoiceIntakeJobFromDatabase(env, 'job-race')).rejects.toThrow(
+      /已完成|cannot delete/i,
+    )
+
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0].stage).toBe('ready')
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.extraction_results).toHaveLength(1)
+    await expect(
+      env.RAW_DOCUMENTS.get('raw-documents/2026/04/src-race-invoice.pdf'),
+    ).resolves.not.toBeNull()
+  })
+
   test('queue processing treats a deleted intake job as an idempotent no-op', async () => {
     const { env } = createFakeD1Env()
     env.RAW_DOCUMENTS = createFakeR2Bucket({})
@@ -473,6 +529,10 @@ interface FakeTables {
 }
 
 type FakeTableInput = Partial<{ [K in keyof FakeTables]: FakeTables[K] }>
+
+interface FakeD1Options {
+  beforeMutation?: (context: { sql: string; tables: FakeTables }) => void
+}
 
 interface SalesDailyRow {
   id: string
@@ -578,7 +638,10 @@ interface LedgerEntryRow {
   created_at: string
 }
 
-function createFakeD1Env(initialTables: FakeTableInput = {}) {
+function createFakeD1Env(
+  initialTables: FakeTableInput = {},
+  options: FakeD1Options = {},
+) {
   const tables: FakeTables = {
     sales_daily: initialTables.sales_daily ?? [],
     source_documents: initialTables.source_documents ?? [],
@@ -592,7 +655,7 @@ function createFakeD1Env(initialTables: FakeTableInput = {}) {
 
   return {
     env: {
-      DB: new FakeD1Database(tables) as unknown as D1Database,
+      DB: new FakeD1Database(tables, options) as unknown as D1Database,
       MODE: 'test',
     } satisfies Partial<AppBindings> as AppBindings,
     tables,
@@ -600,10 +663,13 @@ function createFakeD1Env(initialTables: FakeTableInput = {}) {
 }
 
 class FakeD1Database {
-  constructor(private readonly tables: FakeTables) {}
+  constructor(
+    private readonly tables: FakeTables,
+    private readonly options: FakeD1Options,
+  ) {}
 
   prepare(sql: string) {
-    return new FakeD1PreparedStatement(this.tables, sql)
+    return new FakeD1PreparedStatement(this.tables, this.options, sql)
   }
 
   async batch(statements: FakeD1PreparedStatement[]) {
@@ -622,6 +688,7 @@ class FakeD1PreparedStatement {
 
   constructor(
     private readonly tables: FakeTables,
+    private readonly options: FakeD1Options,
     private readonly sql: string,
   ) {}
 
@@ -643,10 +710,11 @@ class FakeD1PreparedStatement {
   }
 
   async run() {
-    this.mutateRows()
+    this.options.beforeMutation?.({ sql: this.sql, tables: this.tables })
+    const changes = this.mutateRows()
     return {
       success: true,
-      meta: {},
+      meta: { changes },
     }
   }
 
@@ -856,7 +924,7 @@ class FakeD1PreparedStatement {
       } else {
         this.tables.sales_daily.push(nextRow)
       }
-      return
+      return 1
     }
 
     if (sql.includes('invoice:update-extraction')) {
@@ -870,7 +938,7 @@ class FakeD1PreparedStatement {
         row.markdown_text = String(markdownText)
         row.raw_response = String(rawResponse)
       }
-      return
+      return row ? 1 : 0
     }
 
     if (sql.includes('invoice:insert-extraction')) {
@@ -885,7 +953,7 @@ class FakeD1PreparedStatement {
         schema_version: 'invoice-extraction-v1',
         created_at: String(createdAt),
       })
-      return
+      return 1
     }
 
     if (sql.includes('invoice:update-intake-stage')) {
@@ -897,31 +965,62 @@ class FakeD1PreparedStatement {
         row.error_message = null
         row.updated_at = String(updatedAt)
       }
-      return
+      return row ? 1 : 0
     }
 
     if (sql.includes('invoice:delete-extractions')) {
       const [jobId] = this.params
+      const beforeCount = this.tables.extraction_results.length
       this.tables.extraction_results = this.tables.extraction_results.filter(
         (row) => row.intake_job_id !== jobId,
       )
-      return
+      return beforeCount - this.tables.extraction_results.length
+    }
+
+    if (sql.includes('invoice:delete-intake-claim')) {
+      const [jobId] = this.params
+      const row = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage !== 'ready',
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.stage = 'deleting'
+      return 1
+    }
+
+    if (sql.includes('invoice:delete-intake-restore')) {
+      const [stage, jobId] = this.params
+      const row = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage === 'deleting',
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.stage = String(stage)
+      return 1
     }
 
     if (sql.includes('invoice:delete-intake-job')) {
       const [jobId] = this.params
+      const beforeCount = this.tables.intake_jobs.length
       this.tables.intake_jobs = this.tables.intake_jobs.filter(
-        (row) => row.id !== jobId,
+        (row) => row.id !== jobId || row.stage !== 'deleting',
       )
-      return
+      return beforeCount - this.tables.intake_jobs.length
     }
 
     if (sql.includes('invoice:delete-source-document')) {
       const [sourceDocumentId] = this.params
+      const beforeCount = this.tables.source_documents.length
       this.tables.source_documents = this.tables.source_documents.filter(
         (row) => row.id !== sourceDocumentId,
       )
-      return
+      return beforeCount - this.tables.source_documents.length
     }
 
     if (sql.includes('invoice:upsert-invoice')) {
@@ -960,15 +1059,16 @@ class FakeD1PreparedStatement {
       } else {
         this.tables.invoices.push(nextRow)
       }
-      return
+      return 1
     }
 
     if (sql.includes('invoice:delete-items')) {
       const [invoiceId] = this.params
+      const beforeCount = this.tables.invoice_items.length
       this.tables.invoice_items = this.tables.invoice_items.filter(
         (row) => row.invoice_id !== invoiceId,
       )
-      return
+      return beforeCount - this.tables.invoice_items.length
     }
 
     if (sql.includes('invoice:insert-item')) {
@@ -1000,7 +1100,7 @@ class FakeD1PreparedStatement {
         normalized_unit_price: toNullableNumber(normalizedUnitPrice),
         mapping_status: String(mappingStatus),
       })
-      return
+      return 1
     }
 
     if (sql.includes('invoice:upsert-ledger')) {
@@ -1024,7 +1124,7 @@ class FakeD1PreparedStatement {
       } else {
         this.tables.ledger_entries.push(nextRow)
       }
-      return
+      return 1
     }
 
     throw new Error(`Unhandled fake D1 mutation: ${sql}`)
