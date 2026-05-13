@@ -397,6 +397,11 @@ export async function processInvoiceIntakeQueueMessage(
       .run()
 
     if ((failureResult.meta?.changes ?? 0) === 0) {
+      const currentStage = await getCurrentQueueStage(db, message.jobId)
+      if (currentStage.stage === 'deleting' || currentStage.stage === 'deleted') {
+        return currentStage
+      }
+
       throw error
     }
 
@@ -706,6 +711,7 @@ function normalizeIntakeStage(stage: string): InvoiceReviewJob['stage'] {
     case 'needs_review':
     case 'ready':
     case 'error':
+    case 'deleting':
       return stage
     default:
       return 'needs_review'

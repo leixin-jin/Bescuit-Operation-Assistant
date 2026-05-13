@@ -911,6 +911,55 @@ describe('invoice review D1 integration', () => {
     expect(tables.extraction_results).toHaveLength(0)
     expect(tables.source_documents[0]?.status).toBe('uploaded')
   })
+
+  test('queue failure race returns deleting instead of retrying when delete claim wins', async () => {
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [
+          createSourceDocumentRow({
+            id: 'src-queue-failure-race',
+            r2_key: 'raw-documents/2026/04/queue-failure-race.pdf',
+            status: 'uploaded',
+          }),
+        ],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-queue-failure-race',
+            source_document_id: 'src-queue-failure-race',
+            stage: 'queued',
+          }),
+        ],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (
+            sql.includes('update "intake_jobs"') &&
+            currentTables.intake_jobs[0]?.stage === 'extracting'
+          ) {
+            currentTables.intake_jobs[0].stage = 'deleting'
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+
+    await expect(
+      processInvoiceIntakeQueueMessage(env, {
+        jobId: 'job-queue-failure-race',
+        sourceDocumentId: 'src-queue-failure-race',
+        r2Key: 'raw-documents/2026/04/queue-failure-race.pdf',
+        fileName: 'queue-failure-race.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      }),
+    ).resolves.toEqual({
+      jobId: 'job-queue-failure-race',
+      stage: 'deleting',
+    })
+
+    expect(tables.intake_jobs[0]?.stage).toBe('deleting')
+    expect(tables.source_documents[0]?.status).toBe('uploaded')
+  })
 })
 
 interface FakeTables {

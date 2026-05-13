@@ -41,6 +41,7 @@ export type InvoiceIntakeStage =
   | 'needs_review'
   | 'ready'
   | 'error'
+  | 'deleting'
 
 export interface InvoiceHeaderDraft {
   supplier: string
