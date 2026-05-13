@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 
 import { getDb } from '@/lib/db/client'
 import { extractionResults, intakeJobs, sourceDocuments } from '@/lib/db/schema'
@@ -269,14 +269,19 @@ export async function processInvoiceIntakeQueueMessage(
 
   const startedAt = new Date().toISOString()
 
-  await db
+  const startResult = await db
     .update(intakeJobs)
     .set({
       stage: 'extracting',
       errorMessage: null,
       updatedAt: startedAt,
     })
-    .where(eq(intakeJobs.id, message.jobId))
+    .where(and(eq(intakeJobs.id, message.jobId), eq(intakeJobs.stage, jobRow.stage)))
+    .run()
+
+  if ((startResult.meta?.changes ?? 0) === 0) {
+    return getCurrentQueueStage(db, message.jobId)
+  }
 
   try {
     const documentObject = await documentsBucket.get(message.r2Key)
@@ -325,7 +330,7 @@ export async function processInvoiceIntakeQueueMessage(
 
     const finishedAt = new Date().toISOString()
 
-    await db
+    const successResult = await db
       .update(intakeJobs)
       .set({
         stage: 'needs_review',
@@ -335,7 +340,12 @@ export async function processInvoiceIntakeQueueMessage(
         errorMessage: null,
         updatedAt: finishedAt,
       })
-      .where(eq(intakeJobs.id, message.jobId))
+      .where(and(eq(intakeJobs.id, message.jobId), eq(intakeJobs.stage, 'extracting')))
+      .run()
+
+    if ((successResult.meta?.changes ?? 0) === 0) {
+      return getCurrentQueueStage(db, message.jobId)
+    }
 
     await db
       .update(sourceDocuments)
@@ -352,14 +362,19 @@ export async function processInvoiceIntakeQueueMessage(
     const failedAt = new Date().toISOString()
     const errorMessage = formatErrorMessage(error)
 
-    await db
+    const failureResult = await db
       .update(intakeJobs)
       .set({
         stage: 'error',
         errorMessage,
         updatedAt: failedAt,
       })
-      .where(eq(intakeJobs.id, message.jobId))
+      .where(and(eq(intakeJobs.id, message.jobId), eq(intakeJobs.stage, 'extracting')))
+      .run()
+
+    if ((failureResult.meta?.changes ?? 0) === 0) {
+      throw error
+    }
 
     await db
       .update(sourceDocuments)
@@ -373,7 +388,25 @@ export async function processInvoiceIntakeQueueMessage(
 }
 
 export function isTerminalIntakeStage(stage: string) {
-  return stage === 'needs_review' || stage === 'ready'
+  return stage === 'needs_review' || stage === 'ready' || stage === 'deleting'
+}
+
+async function getCurrentQueueStage(
+  db: NonNullable<ReturnType<typeof getDb>>,
+  jobId: string,
+) {
+  const [currentRow] = await db
+    .select({
+      stage: intakeJobs.stage,
+    })
+    .from(intakeJobs)
+    .where(eq(intakeJobs.id, jobId))
+    .limit(1)
+
+  return {
+    jobId,
+    stage: currentRow?.stage ?? 'deleted',
+  }
 }
 
 export function getExtractionResultId(jobId: string) {

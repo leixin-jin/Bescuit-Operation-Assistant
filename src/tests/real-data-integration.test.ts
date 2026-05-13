@@ -363,6 +363,40 @@ describe('invoice review D1 integration', () => {
     })
   })
 
+  test('confirming a deleting review job rejects without writing accounting rows', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [createSourceDocumentRow({ id: 'src-1' })],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-1',
+          source_document_id: 'src-1',
+          stage: 'deleting',
+        }),
+      ],
+      extraction_results: [
+        {
+          id: 'ext-job-1',
+          intake_job_id: 'job-1',
+          markdown_text: '',
+          structured_json: null,
+          raw_response: null,
+          schema_version: 'invoice-extraction-v1',
+          created_at: '2026-04-27T10:00:00.000Z',
+        },
+      ],
+      ingredients: [createIngredientRow({ id: 'coke-330', name: 'Coke 330ml' })],
+    })
+
+    await expect(
+      confirmInvoiceReviewJobInDatabase(env, createReadyReviewJob()),
+    ).rejects.toThrow(/删除|deleting/i)
+
+    expect(tables.intake_jobs[0]?.stage).toBe('deleting')
+    expect(tables.invoices).toHaveLength(0)
+    expect(tables.invoice_items).toHaveLength(0)
+    expect(tables.ledger_entries).toHaveLength(0)
+  })
+
   test('deleting an unfinished intake job deletes extraction rows, D1 records, and the R2 object', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [
@@ -497,6 +531,105 @@ describe('invoice review D1 integration', () => {
     ).resolves.not.toBeNull()
   })
 
+  test('delete cleanup rejects and preserves source document if deleting claim is lost after R2 deletion', async () => {
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [
+          createSourceDocumentRow({
+            id: 'src-lost-claim',
+            r2_key: 'raw-documents/2026/04/src-lost-claim-invoice.pdf',
+          }),
+        ],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-lost-claim',
+            source_document_id: 'src-lost-claim',
+            stage: 'needs_review',
+          }),
+        ],
+        extraction_results: [
+          {
+            id: 'ext-lost-claim',
+            intake_job_id: 'job-lost-claim',
+            markdown_text: 'markdown',
+            structured_json: null,
+            raw_response: null,
+            schema_version: 'invoice-extraction-v1',
+            created_at: '2026-04-27T10:00:00.000Z',
+          },
+        ],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (sql.includes('invoice:delete-intake-job')) {
+            currentTables.intake_jobs[0].stage = 'needs_review'
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-lost-claim-invoice.pdf': {
+        body: '%PDF-lost-claim',
+        contentType: 'application/pdf',
+      },
+    })
+
+    await expect(
+      deleteInvoiceIntakeJobFromDatabase(env, 'job-lost-claim'),
+    ).rejects.toThrow(/删除状态|deleting|claim/i)
+
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0].stage).toBe('needs_review')
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.extraction_results).toHaveLength(0)
+    await expect(
+      env.RAW_DOCUMENTS.get('raw-documents/2026/04/src-lost-claim-invoice.pdf'),
+    ).resolves.toBeNull()
+  })
+
+  test('deleting restores the previous stage if R2 deletion fails after claim', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-r2-fail',
+          r2_key: 'raw-documents/2026/04/src-r2-fail-invoice.pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-r2-fail',
+          source_document_id: 'src-r2-fail',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        {
+          id: 'ext-r2-fail',
+          intake_job_id: 'job-r2-fail',
+          markdown_text: 'markdown',
+          structured_json: null,
+          raw_response: null,
+          schema_version: 'invoice-extraction-v1',
+          created_at: '2026-04-27T10:00:00.000Z',
+        },
+      ],
+    })
+    env.RAW_DOCUMENTS = {
+      delete: async () => {
+        throw new Error('r2 unavailable')
+      },
+    } as unknown as R2Bucket
+
+    await expect(deleteInvoiceIntakeJobFromDatabase(env, 'job-r2-fail')).rejects.toThrow(
+      'r2 unavailable',
+    )
+
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0].stage).toBe('needs_review')
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.extraction_results).toHaveLength(1)
+  })
+
   test('queue processing treats a deleted intake job as an idempotent no-op', async () => {
     const { env } = createFakeD1Env()
     env.RAW_DOCUMENTS = createFakeR2Bucket({})
@@ -514,6 +647,36 @@ describe('invoice review D1 integration', () => {
       jobId: 'job-already-deleted',
       stage: 'deleted',
     })
+  })
+
+  test('queue processing treats a deleting intake job as an idempotent no-op', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [createSourceDocumentRow({ id: 'src-deleting' })],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-deleting',
+          source_document_id: 'src-deleting',
+          stage: 'deleting',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+
+    await expect(
+      processInvoiceIntakeQueueMessage(env, {
+        jobId: 'job-deleting',
+        sourceDocumentId: 'src-deleting',
+        r2Key: 'raw-documents/2026/04/deleting.pdf',
+        fileName: 'deleting.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      }),
+    ).resolves.toEqual({
+      jobId: 'job-deleting',
+      stage: 'deleting',
+    })
+
+    expect(tables.intake_jobs[0]?.stage).toBe('deleting')
   })
 })
 
@@ -928,7 +1091,8 @@ class FakeD1PreparedStatement {
     }
 
     if (sql.includes('invoice:update-extraction')) {
-      const [structuredJson, markdownText, rawResponse, extractionId] = this.params
+      const [structuredJson, markdownText, rawResponse, schemaVersion, extractionId] =
+        this.params
       const row = this.tables.extraction_results.find(
         (candidate) => candidate.id === extractionId,
       )
@@ -937,6 +1101,7 @@ class FakeD1PreparedStatement {
         row.structured_json = String(structuredJson)
         row.markdown_text = String(markdownText)
         row.raw_response = String(rawResponse)
+        row.schema_version = String(schemaVersion)
       }
       return row ? 1 : 0
     }
@@ -958,7 +1123,11 @@ class FakeD1PreparedStatement {
 
     if (sql.includes('invoice:update-intake-stage')) {
       const [stage, updatedAt, jobId] = this.params
-      const row = this.tables.intake_jobs.find((candidate) => candidate.id === jobId)
+      const row = this.tables.intake_jobs.find(
+        (candidate) =>
+          candidate.id === jobId &&
+          (!sql.includes("stage != 'deleting'") || candidate.stage !== 'deleting'),
+      )
 
       if (row) {
         row.stage = String(stage)

@@ -190,37 +190,36 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     }
   }
 
-  const statements: D1PreparedStatement[] = [
-    db
-      .prepare(
-        `/* invoice:delete-extractions */
-        DELETE FROM extraction_results
-        WHERE intake_job_id = ?`,
-      )
-      .bind(row.jobId),
-    db
-      .prepare(
-        `/* invoice:delete-intake-job */
-        DELETE FROM intake_jobs
-        WHERE id = ? AND stage = 'deleting'`,
-      )
-      .bind(row.jobId),
-    db
-      .prepare(
-        `/* invoice:delete-source-document */
-        DELETE FROM source_documents
-        WHERE id = ?`,
-      )
-      .bind(row.sourceDocumentId),
-  ]
+  await db
+    .prepare(
+      `/* invoice:delete-extractions */
+      DELETE FROM extraction_results
+      WHERE intake_job_id = ?`,
+    )
+    .bind(row.jobId)
+    .run()
 
-  if (typeof db.batch === 'function') {
-    await db.batch(statements)
-  } else {
-    for (const statement of statements) {
-      await statement.run()
-    }
+  const intakeDeleteResult = await db
+    .prepare(
+      `/* invoice:delete-intake-job */
+      DELETE FROM intake_jobs
+      WHERE id = ? AND stage = 'deleting'`,
+    )
+    .bind(row.jobId)
+    .run()
+
+  if ((intakeDeleteResult.meta?.changes ?? 0) !== 1) {
+    throw new Error('发票任务删除状态已变化，不能完成删除。')
   }
+
+  await db
+    .prepare(
+      `/* invoice:delete-source-document */
+      DELETE FROM source_documents
+      WHERE id = ?`,
+    )
+    .bind(row.sourceDocumentId)
+    .run()
 
   return {
     ok: true,
@@ -301,7 +300,7 @@ async function persistInvoiceReviewDraft(
       .run()
   }
 
-  await db
+  const stageUpdateResult = await db
     .prepare(
       `/* invoice:update-intake-stage */
       UPDATE intake_jobs
@@ -309,10 +308,14 @@ async function persistInvoiceReviewDraft(
         stage = ?,
         error_message = NULL,
         updated_at = ?
-      WHERE id = ?`,
+      WHERE id = ? AND stage != 'deleting'`,
     )
     .bind(nextStage, now, job.jobId)
     .run()
+
+  if ((stageUpdateResult.meta?.changes ?? 0) === 0) {
+    throw new Error('发票任务正在删除，不能保存或确认。')
+  }
 
   return {
     ...job,
