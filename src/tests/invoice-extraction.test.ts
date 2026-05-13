@@ -53,7 +53,7 @@ describe('invoice extraction helpers', () => {
       provider: 'gemini',
       model: 'gemini-3.1-flash-lite',
     }
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       new Response(
         JSON.stringify({
           candidates: [
@@ -354,6 +354,7 @@ Total: 87,40
   test('exposes helpers for queue idempotency and processing state', () => {
     expect(isTerminalIntakeStage('needs_review')).toBe(true)
     expect(isTerminalIntakeStage('ready')).toBe(true)
+    expect(isTerminalIntakeStage('deleting')).toBe(true)
     expect(isTerminalIntakeStage('error')).toBe(false)
     expect(getExtractionResultId('job-123')).toBe('ext_job-123')
 
@@ -367,6 +368,14 @@ Total: 87,40
 
     expect(getInvoiceJobStage(job)).toBe('extracting')
     expect(isInvoiceJobProcessing(job)).toBe(true)
+    expect(
+      buildInvoiceReviewJob({
+        jobId: 'job-789',
+        fileName: 'deleting.pdf',
+        uploadedAt: '2026-04-18T08:00:00.000Z',
+        stage: 'deleting',
+      }).stage,
+    ).toBe('deleting')
     expect(getInvoiceStatusLabel('error')).toBe('处理失败')
   })
 })

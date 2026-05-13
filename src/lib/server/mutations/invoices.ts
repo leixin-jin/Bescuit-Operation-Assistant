@@ -4,6 +4,7 @@ import {
 } from '@/lib/server/app-domain'
 import {
   createStoredInvoiceJob,
+  deleteStoredInvoiceJob,
   upsertStoredInvoiceJob,
 } from '@/lib/server/demo-data'
 
@@ -13,6 +14,10 @@ export async function createInvoiceIntakeJob(fileName: string) {
 
 export async function saveInvoiceReviewJob(job: InvoiceReviewJob) {
   return upsertStoredInvoiceJob(job)
+}
+
+export async function deleteInvoiceIntakeJob(jobId: string) {
+  return deleteStoredInvoiceJob(jobId)
 }
 
 export async function confirmInvoiceReviewJob(job: InvoiceReviewJob) {

@@ -1,7 +1,7 @@
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 
 import { getDb } from '@/lib/db/client'
-import { extractionResults, intakeJobs, sourceDocuments } from '@/lib/db/schema'
+import { intakeJobs } from '@/lib/db/schema'
 import {
   getMadridTodayInputValue,
   type InvoiceHeaderDraft,
@@ -254,7 +254,10 @@ export async function processInvoiceIntakeQueueMessage(
     .limit(1)
 
   if (!jobRow) {
-    throw new Error(`Intake job not found: ${message.jobId}`)
+    return {
+      jobId: message.jobId,
+      stage: 'deleted',
+    }
   }
 
   if (isTerminalIntakeStage(jobRow.stage)) {
@@ -266,14 +269,19 @@ export async function processInvoiceIntakeQueueMessage(
 
   const startedAt = new Date().toISOString()
 
-  await db
+  const startResult = await db
     .update(intakeJobs)
     .set({
       stage: 'extracting',
       errorMessage: null,
       updatedAt: startedAt,
     })
-    .where(eq(intakeJobs.id, message.jobId))
+    .where(and(eq(intakeJobs.id, message.jobId), eq(intakeJobs.stage, jobRow.stage)))
+    .run()
+
+  if ((startResult.meta?.changes ?? 0) === 0) {
+    return getCurrentQueueStage(db, message.jobId)
+  }
 
   try {
     const documentObject = await documentsBucket.get(message.r2Key)
@@ -293,36 +301,60 @@ export async function processInvoiceIntakeQueueMessage(
     const provider = selectInvoiceExtractionProvider(env)
     const extraction = await provider.extract(providerInput)
     const extractionDraft = extraction.draft
+    const currentStage = await getCurrentQueueStage(db, message.jobId)
+
+    if (currentStage.stage !== 'extracting') {
+      return currentStage
+    }
 
     const extractionStoredAt = new Date().toISOString()
     const schemaVersion =
       extractionDraft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION
 
-    await db
-      .insert(extractionResults)
-      .values({
-        id: getExtractionResultId(message.jobId),
-        intakeJobId: message.jobId,
-        markdownText: extractionDraft.markdownText,
-        structuredJson: serializeExtractionDraft(extractionDraft),
-        rawResponse: extraction.rawResponse,
+    const extractionResult = await db.$client.prepare(
+      `/* invoice:queue-upsert-extraction */
+      INSERT INTO extraction_results (
+        id,
+        intake_job_id,
+        markdown_text,
+        structured_json,
+        raw_response,
+        schema_version,
+        created_at
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1
+        FROM intake_jobs
+        WHERE intake_jobs.id = ?
+          AND intake_jobs.stage = 'extracting'
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        markdown_text = excluded.markdown_text,
+        structured_json = excluded.structured_json,
+        raw_response = excluded.raw_response,
+        schema_version = excluded.schema_version,
+        created_at = excluded.created_at`,
+    )
+      .bind(
+        getExtractionResultId(message.jobId),
+        message.jobId,
+        extractionDraft.markdownText,
+        serializeExtractionDraft(extractionDraft),
+        extraction.rawResponse,
         schemaVersion,
-        createdAt: extractionStoredAt,
-      })
-      .onConflictDoUpdate({
-        target: extractionResults.id,
-        set: {
-          markdownText: extractionDraft.markdownText,
-          structuredJson: serializeExtractionDraft(extractionDraft),
-          rawResponse: extraction.rawResponse,
-          schemaVersion,
-          createdAt: extractionStoredAt,
-        },
-      })
+        extractionStoredAt,
+        message.jobId,
+      )
+      .run()
+
+    if ((extractionResult.meta?.changes ?? 0) === 0) {
+      return getCurrentQueueStage(db, message.jobId)
+    }
 
     const finishedAt = new Date().toISOString()
 
-    await db
+    const successResult = await db
       .update(intakeJobs)
       .set({
         stage: 'needs_review',
@@ -332,14 +364,31 @@ export async function processInvoiceIntakeQueueMessage(
         errorMessage: null,
         updatedAt: finishedAt,
       })
-      .where(eq(intakeJobs.id, message.jobId))
+      .where(and(eq(intakeJobs.id, message.jobId), eq(intakeJobs.stage, 'extracting')))
+      .run()
 
-    await db
-      .update(sourceDocuments)
-      .set({
-        status: 'processed',
-      })
-      .where(eq(sourceDocuments.id, message.sourceDocumentId))
+    if ((successResult.meta?.changes ?? 0) === 0) {
+      return getCurrentQueueStage(db, message.jobId)
+    }
+
+    const sourceProcessedResult = await db.$client.prepare(
+      `/* invoice:queue-source-processed */
+      UPDATE source_documents
+      SET status = 'processed'
+      WHERE id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'needs_review'
+        )`,
+    )
+      .bind(message.sourceDocumentId, message.jobId)
+      .run()
+
+    if ((sourceProcessedResult.meta?.changes ?? 0) === 0) {
+      return getCurrentQueueStage(db, message.jobId)
+    }
 
     return {
       jobId: message.jobId,
@@ -349,28 +398,73 @@ export async function processInvoiceIntakeQueueMessage(
     const failedAt = new Date().toISOString()
     const errorMessage = formatErrorMessage(error)
 
-    await db
+    const failureResult = await db
       .update(intakeJobs)
       .set({
         stage: 'error',
         errorMessage,
         updatedAt: failedAt,
       })
-      .where(eq(intakeJobs.id, message.jobId))
+      .where(and(eq(intakeJobs.id, message.jobId), eq(intakeJobs.stage, 'extracting')))
+      .run()
 
-    await db
-      .update(sourceDocuments)
-      .set({
-        status: 'error',
-      })
-      .where(eq(sourceDocuments.id, message.sourceDocumentId))
+    if ((failureResult.meta?.changes ?? 0) === 0) {
+      const currentStage = await getCurrentQueueStage(db, message.jobId)
+      if (currentStage.stage === 'deleting' || currentStage.stage === 'deleted') {
+        return currentStage
+      }
+
+      throw error
+    }
+
+    const sourceErrorResult = await db.$client.prepare(
+      `/* invoice:queue-source-error */
+      UPDATE source_documents
+      SET status = 'error'
+      WHERE id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'error'
+        )`,
+    )
+      .bind(message.sourceDocumentId, message.jobId)
+      .run()
+
+    if ((sourceErrorResult.meta?.changes ?? 0) === 0) {
+      const currentStage = await getCurrentQueueStage(db, message.jobId)
+      if (currentStage.stage === 'deleting' || currentStage.stage === 'deleted') {
+        return currentStage
+      }
+
+      throw error
+    }
 
     throw error
   }
 }
 
 export function isTerminalIntakeStage(stage: string) {
-  return stage === 'needs_review' || stage === 'ready'
+  return stage === 'needs_review' || stage === 'ready' || stage === 'deleting'
+}
+
+async function getCurrentQueueStage(
+  db: NonNullable<ReturnType<typeof getDb>>,
+  jobId: string,
+) {
+  const [currentRow] = await db
+    .select({
+      stage: intakeJobs.stage,
+    })
+    .from(intakeJobs)
+    .where(eq(intakeJobs.id, jobId))
+    .limit(1)
+
+  return {
+    jobId,
+    stage: currentRow?.stage ?? 'deleted',
+  }
 }
 
 export function getExtractionResultId(jobId: string) {
@@ -646,6 +740,7 @@ function normalizeIntakeStage(stage: string): InvoiceReviewJob['stage'] {
     case 'needs_review':
     case 'ready':
     case 'error':
+    case 'deleting':
       return stage
     default:
       return 'needs_review'

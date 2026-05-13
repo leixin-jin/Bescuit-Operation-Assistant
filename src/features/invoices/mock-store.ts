@@ -14,6 +14,7 @@ import type {
 } from '@/lib/server/app-domain'
 import {
   createInvoiceIntakeJob,
+  deleteInvoiceIntakeJob,
   saveInvoiceReviewJob,
 } from '@/lib/server/mutations/invoices'
 import {
@@ -38,6 +39,10 @@ export async function createInvoiceJob(fileName: string) {
 
 export async function saveInvoiceJob(job: InvoiceReviewJob) {
   return saveInvoiceReviewJob(job)
+}
+
+export async function deleteInvoiceJob(jobId: string) {
+  return deleteInvoiceIntakeJob(jobId)
 }
 
 export { getInvoiceStatusLabel as getStatusLabel, getInvoiceJob, listInvoiceJobs }

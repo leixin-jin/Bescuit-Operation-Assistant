@@ -1,9 +1,28 @@
 import { useState, type ChangeEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, createFileRoute, useRouter } from '@tanstack/react-router'
-import { ArrowLeft, Camera, CheckCircle, FileImage, Upload, XCircle } from 'lucide-react'
+import {
+  ArrowLeft,
+  Camera,
+  CheckCircle,
+  FileImage,
+  Trash2,
+  Upload,
+  XCircle,
+} from 'lucide-react'
 
 import { AppShell } from '@/components/app-shell'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -21,8 +40,15 @@ import {
   MAX_INVOICE_UPLOAD_SIZE_BYTES,
   validateInvoiceUpload,
 } from '@/features/invoices/intake-file-validation'
-import { createInvoiceIntakeJob } from '@/lib/server/mutations/invoices'
-import { uploadInvoiceIntakeDocument } from '@/lib/server/mutations/invoices.rpc'
+import { isInvoiceJobDeletable } from '@/lib/server/app-domain'
+import {
+  createInvoiceIntakeJob,
+  deleteInvoiceIntakeJob,
+} from '@/lib/server/mutations/invoices'
+import {
+  deleteInvoiceIntakeJobServerFn,
+  uploadInvoiceIntakeDocument,
+} from '@/lib/server/mutations/invoices.rpc'
 import {
   formatInvoiceTimestamp,
   getInvoiceStatusLabel,
@@ -87,6 +113,30 @@ function InvoiceIntakePage() {
     onError: (error) => {
       setFileErrorMessage(
         error instanceof Error ? error.message : '创建 intake 任务失败。',
+      )
+    },
+  })
+
+  const deleteJobMutation = useMutation<
+    { ok: boolean; deleted: boolean },
+    Error,
+    string
+  >({
+    mutationFn: (jobId) =>
+      pipelineEnabled
+        ? deleteInvoiceIntakeJobServerFn({ data: { jobId } })
+        : deleteInvoiceIntakeJob(jobId),
+    onSuccess: async () => {
+      setFileErrorMessage(null)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['invoice-jobs'] }),
+        queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] }),
+        router.invalidate(),
+      ])
+    },
+    onError: (error) => {
+      setFileErrorMessage(
+        error instanceof Error ? error.message : '删除 intake 任务失败。',
       )
     },
   })
@@ -347,27 +397,75 @@ function InvoiceIntakePage() {
             </CardHeader>
             <CardContent className="space-y-3">
               {recentJobs.length > 0 ? (
-                recentJobs.map((job) => (
-                  <Link
-                    key={job.jobId}
-                    to="/invoices/review/$jobId"
-                    params={{ jobId: job.jobId }}
-                    className="block rounded-xl border bg-background p-4 transition-colors hover:border-primary/40 hover:bg-accent/30"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate font-medium">{job.fileName}</p>
-                        <p className="mt-1 text-sm text-muted-foreground">
+                recentJobs.map((job) => {
+                  const canDelete = isInvoiceJobDeletable(job)
+                  const isDeleting =
+                    deleteJobMutation.isPending &&
+                    deleteJobMutation.variables === job.jobId
+
+                  return (
+                    <div
+                      key={job.jobId}
+                      className="flex items-start gap-3 rounded-xl border bg-background p-4 transition-colors hover:border-primary/40 hover:bg-accent/30"
+                    >
+                      <Link
+                        to="/invoices/review/$jobId"
+                        params={{ jobId: job.jobId }}
+                        className="min-w-0 flex-1"
+                      >
+                        <span className="block truncate font-medium">
+                          {job.fileName}
+                        </span>
+                        <span className="mt-1 block text-sm text-muted-foreground">
                           {job.header.supplier || '待补充供应商'} ·{' '}
                           {formatInvoiceTimestamp(job.uploadedAt)}
-                        </p>
+                        </span>
+                      </Link>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Badge variant="secondary" className="rounded-lg">
+                          {getInvoiceStatusLabel(job.status)}
+                        </Badge>
+                        {canDelete ? (
+                          <AlertDialog>
+                            <AlertDialogTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-sm"
+                                className="rounded-lg text-muted-foreground hover:text-destructive"
+                                aria-label={`删除 ${job.fileName}`}
+                                disabled={isDeleting}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </AlertDialogTrigger>
+                            <AlertDialogContent>
+                              <AlertDialogHeader>
+                                <AlertDialogTitle>删除最近任务</AlertDialogTitle>
+                                <AlertDialogDescription>
+                                  这会从最近任务中删除 {job.fileName}
+                                  ，真实链路还会删除对应的原始文件。
+                                </AlertDialogDescription>
+                              </AlertDialogHeader>
+                              <AlertDialogFooter>
+                                <AlertDialogCancel>取消</AlertDialogCancel>
+                                <AlertDialogAction
+                                  className="bg-destructive text-white hover:bg-destructive/90"
+                                  disabled={isDeleting}
+                                  onClick={() =>
+                                    deleteJobMutation.mutate(job.jobId)
+                                  }
+                                >
+                                  {isDeleting ? '删除中...' : '删除任务'}
+                                </AlertDialogAction>
+                              </AlertDialogFooter>
+                            </AlertDialogContent>
+                          </AlertDialog>
+                        ) : null}
                       </div>
-                      <Badge variant="secondary" className="shrink-0 rounded-lg">
-                        {getInvoiceStatusLabel(job.status)}
-                      </Badge>
                     </div>
-                  </Link>
-                ))
+                  )
+                })
               ) : (
                 <div className="rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">
                   当前还没有 intake job。

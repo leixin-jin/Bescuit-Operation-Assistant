@@ -41,6 +41,7 @@ export type InvoiceIntakeStage =
   | 'needs_review'
   | 'ready'
   | 'error'
+  | 'deleting'
 
 export interface InvoiceHeaderDraft {
   supplier: string
@@ -218,6 +219,12 @@ export function isInvoiceJobProcessing(
 ) {
   const stage = getInvoiceJobStage(job)
   return stage === 'queued' || stage === 'extracting'
+}
+
+export function isInvoiceJobDeletable(
+  job: Pick<InvoiceReviewJob, 'stage' | 'status'>,
+) {
+  return getInvoiceJobStage(job) !== 'ready'
 }
 
 export function normalizeSalesDraftInput(

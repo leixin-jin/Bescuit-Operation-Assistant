@@ -5,6 +5,7 @@ import { getServerEnv, type AppBindings } from '@/lib/server/bindings'
 import { allD1, requireD1Database } from '@/lib/server/d1'
 import {
   getInvoiceReadinessSummary,
+  isInvoiceJobDeletable,
   parseCurrencyAmount,
   parseOptionalCurrencyAmount,
   roundCurrency,
@@ -27,6 +28,17 @@ interface LatestExtractionRow {
 
 interface IntakeSourceRow {
   sourceDocumentId: string
+}
+
+interface IntakeStageRow {
+  stage: string
+}
+
+interface DeletableIntakeJobRow {
+  jobId: string
+  stage: string
+  sourceDocumentId: string
+  r2Key: string | null
 }
 
 export const uploadInvoiceIntakeDocument = createServerFn({ method: 'POST' })
@@ -57,6 +69,18 @@ export const uploadInvoiceIntakeDocument = createServerFn({ method: 'POST' })
       uploadedBy,
     })
   })
+
+export const deleteInvoiceIntakeJobServerFn = createServerFn({ method: 'POST' })
+  .inputValidator((data: { jobId: string }) => {
+    if (!data.jobId.trim()) {
+      throw new Error('Expected invoice intake job id')
+    }
+
+    return { jobId: data.jobId.trim() }
+  })
+  .handler(async ({ data, context }) =>
+    deleteInvoiceIntakeJobFromDatabase(getServerEnv(context), data.jobId),
+  )
 
 export const saveInvoiceReviewJobServerFn = createServerFn({ method: 'POST' })
   .inputValidator((data: { job: InvoiceReviewJob }) => data)
@@ -96,6 +120,123 @@ export async function confirmInvoiceReviewJobInDatabase(
   }
 }
 
+export async function deleteInvoiceIntakeJobFromDatabase(
+  env: Partial<AppBindings> | null | undefined,
+  jobId: string,
+) {
+  const db = requireD1Database(env, 'invoice intake delete')
+  const [row] = await allD1<DeletableIntakeJobRow>(
+    db,
+    `/* invoice:delete-intake-load */
+    SELECT
+      intake_jobs.id AS jobId,
+      intake_jobs.stage AS stage,
+      source_documents.id AS sourceDocumentId,
+      source_documents.r2_key AS r2Key
+    FROM intake_jobs
+    INNER JOIN source_documents
+      ON source_documents.id = intake_jobs.source_document_id
+    WHERE intake_jobs.id = ?
+    LIMIT 1`,
+    [jobId],
+  )
+
+  if (!row) {
+    return {
+      ok: true,
+      deleted: false,
+    }
+  }
+
+  if (
+    !isInvoiceJobDeletable({
+      stage: row.stage as InvoiceReviewJob['stage'],
+      status: row.stage === 'ready' ? 'ready' : 'needs_review',
+    })
+  ) {
+    throw new Error('已完成的发票任务不能从最近任务中删除。')
+  }
+
+  const rawDocumentsBucket = env?.RAW_DOCUMENTS
+
+  if (row.r2Key && !rawDocumentsBucket) {
+    throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
+  }
+
+  const claimResult = await db
+    .prepare(
+      `/* invoice:delete-intake-claim */
+      UPDATE intake_jobs
+      SET stage = 'deleting'
+      WHERE id = ? AND stage != 'ready'`,
+    )
+    .bind(row.jobId)
+    .run()
+
+  if ((claimResult.meta?.changes ?? 0) === 0) {
+    throw new Error('已完成的发票任务不能从最近任务中删除。')
+  }
+
+  if (row.r2Key) {
+    const documentsBucket = rawDocumentsBucket
+
+    if (!documentsBucket) {
+      throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
+    }
+
+    try {
+      await documentsBucket.delete(row.r2Key)
+    } catch (error) {
+      await db
+        .prepare(
+          `/* invoice:delete-intake-restore */
+          UPDATE intake_jobs
+          SET stage = ?
+          WHERE id = ? AND stage = 'deleting'`,
+        )
+        .bind(row.stage, row.jobId)
+        .run()
+      throw error
+    }
+  }
+
+  await db
+    .prepare(
+      `/* invoice:delete-extractions */
+      DELETE FROM extraction_results
+      WHERE intake_job_id = ?`,
+    )
+    .bind(row.jobId)
+    .run()
+
+  const intakeDeleteResult = await db
+    .prepare(
+      `/* invoice:delete-intake-job */
+      DELETE FROM intake_jobs
+      WHERE id = ? AND stage = 'deleting'`,
+    )
+    .bind(row.jobId)
+    .run()
+
+  if ((intakeDeleteResult.meta?.changes ?? 0) !== 1) {
+    throw new Error('发票任务删除状态已变化，不能完成删除。')
+  }
+
+  await db
+    .prepare(
+      `/* invoice:delete-source-document */
+      DELETE FROM source_documents
+      WHERE id = ?`,
+    )
+    .bind(row.sourceDocumentId)
+    .run()
+
+  return {
+    ok: true,
+    deleted: true,
+  }
+}
+
 async function persistInvoiceReviewDraft(
   env: Partial<AppBindings> | null | undefined,
   job: InvoiceReviewJob,
@@ -115,9 +256,10 @@ async function persistInvoiceReviewDraft(
   }
   const latestExtraction = await getLatestExtractionRow(db, job.jobId)
   const now = new Date().toISOString()
+  await assertInvoiceReviewDraftWritable(db, job.jobId)
 
   if (latestExtraction) {
-    await db
+    const extractionUpdateResult = await db
       .prepare(
         `/* invoice:update-extraction */
         UPDATE extraction_results
@@ -126,7 +268,13 @@ async function persistInvoiceReviewDraft(
           markdown_text = ?,
           raw_response = ?,
           schema_version = ?
-        WHERE id = ?`,
+        WHERE id = ?
+          AND EXISTS (
+            SELECT 1
+            FROM intake_jobs
+            WHERE intake_jobs.id = ?
+              AND intake_jobs.stage != 'deleting'
+          )`,
       )
       .bind(
         serializeExtractionDraft(nextDraft),
@@ -137,10 +285,13 @@ async function persistInvoiceReviewDraft(
         }),
         nextDraft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION,
         latestExtraction.id,
+        job.jobId,
       )
       .run()
+
+    assertInvoiceMutationChanged(extractionUpdateResult, '发票任务正在删除，不能保存或确认。')
   } else {
-    await db
+    const extractionInsertResult = await db
       .prepare(
         `/* invoice:insert-extraction */
         INSERT INTO extraction_results (
@@ -152,7 +303,13 @@ async function persistInvoiceReviewDraft(
           schema_version,
           created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        SELECT ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage != 'deleting'
+        )`,
       )
       .bind(
         `ext_${job.jobId}`,
@@ -165,11 +322,14 @@ async function persistInvoiceReviewDraft(
         }),
         nextDraft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION,
         now,
+        job.jobId,
       )
       .run()
+
+    assertInvoiceMutationChanged(extractionInsertResult, '发票任务正在删除，不能保存或确认。')
   }
 
-  await db
+  const stageUpdateResult = await db
     .prepare(
       `/* invoice:update-intake-stage */
       UPDATE intake_jobs
@@ -177,10 +337,14 @@ async function persistInvoiceReviewDraft(
         stage = ?,
         error_message = NULL,
         updated_at = ?
-      WHERE id = ?`,
+      WHERE id = ? AND stage != 'deleting'`,
     )
     .bind(nextStage, now, job.jobId)
     .run()
+
+  if ((stageUpdateResult.meta?.changes ?? 0) === 0) {
+    throw new Error('发票任务正在删除，不能保存或确认。')
+  }
 
   return {
     ...job,
@@ -196,6 +360,7 @@ async function writeConfirmedInvoiceAccounting(
   job: InvoiceReviewJob,
 ) {
   const db = requireD1Database(env, 'invoice accounting')
+  await assertInvoiceReviewDraftWritable(db, job.jobId)
   const sourceDocumentId = await getSourceDocumentId(db, job.jobId)
   const invoiceId = getInvoiceId(job.jobId)
   const ledgerEntryId = getLedgerEntryId(invoiceId)
@@ -203,47 +368,58 @@ async function writeConfirmedInvoiceAccounting(
   const taxAmount = parseCurrencyAmount(job.header.taxAmount)
   const subtotalAmount = roundCurrency(totalAmount - taxAmount)
   const now = new Date().toISOString()
-  const statements: D1PreparedStatement[] = [
-    db
-      .prepare(
-        `/* invoice:upsert-invoice */
-        INSERT INTO invoices (
-          id,
-          intake_job_id,
-          invoice_date,
-          supplier_name,
-          document_number,
-          subtotal_amount,
-          tax_amount,
-          total_amount,
-          source_document_id,
-          review_status,
-          updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)
-        ON CONFLICT(id) DO UPDATE SET
-          invoice_date = excluded.invoice_date,
-          supplier_name = excluded.supplier_name,
-          document_number = excluded.document_number,
-          subtotal_amount = excluded.subtotal_amount,
-          tax_amount = excluded.tax_amount,
-          total_amount = excluded.total_amount,
-          source_document_id = excluded.source_document_id,
-          review_status = excluded.review_status,
-          updated_at = excluded.updated_at`,
+  const invoiceUpsertResult = await db
+    .prepare(
+      `/* invoice:upsert-invoice */
+      INSERT INTO invoices (
+        id,
+        intake_job_id,
+        invoice_date,
+        supplier_name,
+        document_number,
+        subtotal_amount,
+        tax_amount,
+        total_amount,
+        source_document_id,
+        review_status,
+        updated_at
       )
-      .bind(
-        invoiceId,
-        job.jobId,
-        job.header.date,
-        job.header.supplier.trim(),
-        job.header.invoiceNo.trim(),
-        subtotalAmount,
-        taxAmount,
-        totalAmount,
-        sourceDocumentId,
-        now,
-      ),
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?
+      WHERE EXISTS (
+        SELECT 1
+        FROM intake_jobs
+        WHERE intake_jobs.id = ?
+          AND intake_jobs.stage = 'ready'
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        invoice_date = excluded.invoice_date,
+        supplier_name = excluded.supplier_name,
+        document_number = excluded.document_number,
+        subtotal_amount = excluded.subtotal_amount,
+        tax_amount = excluded.tax_amount,
+        total_amount = excluded.total_amount,
+        source_document_id = excluded.source_document_id,
+        review_status = excluded.review_status,
+        updated_at = excluded.updated_at`,
+    )
+    .bind(
+      invoiceId,
+      job.jobId,
+      job.header.date,
+      job.header.supplier.trim(),
+      job.header.invoiceNo.trim(),
+      subtotalAmount,
+      taxAmount,
+      totalAmount,
+      sourceDocumentId,
+      now,
+      job.jobId,
+    )
+    .run()
+
+  assertInvoiceMutationChanged(invoiceUpsertResult, '发票任务正在删除，不能保存或确认。')
+
+  const statements: D1PreparedStatement[] = [
     db
       .prepare(
         `/* invoice:delete-items */
@@ -371,6 +547,28 @@ async function getSourceDocumentId(db: D1Database, jobId: string) {
   }
 
   return sourceDocumentId
+}
+
+async function assertInvoiceReviewDraftWritable(db: D1Database, jobId: string) {
+  const rows = await allD1<IntakeStageRow>(
+    db,
+    `/* invoice:review-draft-stage */
+    SELECT stage
+    FROM intake_jobs
+    WHERE id = ?
+    LIMIT 1`,
+    [jobId],
+  )
+
+  if (rows[0]?.stage === 'deleting') {
+    throw new Error('发票任务正在删除，不能保存或确认。')
+  }
+}
+
+function assertInvoiceMutationChanged(result: D1Result, message: string) {
+  if ((result.meta?.changes ?? 0) === 0) {
+    throw new Error(message)
+  }
 }
 
 function calculateLineTotal(quantity: string, unitPrice: string) {

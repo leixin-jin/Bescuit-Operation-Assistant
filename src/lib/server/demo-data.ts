@@ -1,6 +1,7 @@
 import type { IngredientOption } from '@/lib/server/app-domain'
 import {
   createStoredInvoiceJob,
+  deleteStoredInvoiceJob,
   getStoredInvoiceJob,
   getStoredSalesRecord,
   listStoredInvoiceJobs,
@@ -20,6 +21,7 @@ export const demoIngredientOptions: IngredientOption[] = [
 
 export {
   createStoredInvoiceJob,
+  deleteStoredInvoiceJob,
   getStoredInvoiceJob,
   getStoredSalesRecord,
   listStoredInvoiceJobs,
