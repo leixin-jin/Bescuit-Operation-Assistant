@@ -912,6 +912,57 @@ describe('invoice review D1 integration', () => {
     expect(tables.source_documents[0]?.status).toBe('uploaded')
   })
 
+  test('queue success source update is skipped if delete claim wins after stage update', async () => {
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [
+          createSourceDocumentRow({
+            id: 'src-queue-source-race',
+            r2_key: 'raw-documents/2026/04/queue-source-race.pdf',
+            status: 'uploaded',
+          }),
+        ],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-queue-source-race',
+            source_document_id: 'src-queue-source-race',
+            stage: 'queued',
+          }),
+        ],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (sql.includes('invoice:queue-source-processed')) {
+            currentTables.intake_jobs[0].stage = 'deleting'
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/queue-source-race.pdf': {
+        body: '%PDF-queue-source-race',
+        contentType: 'application/pdf',
+      },
+    })
+
+    await expect(
+      processInvoiceIntakeQueueMessage(env, {
+        jobId: 'job-queue-source-race',
+        sourceDocumentId: 'src-queue-source-race',
+        r2Key: 'raw-documents/2026/04/queue-source-race.pdf',
+        fileName: 'queue-source-race.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      }),
+    ).resolves.toEqual({
+      jobId: 'job-queue-source-race',
+      stage: 'deleting',
+    })
+
+    expect(tables.intake_jobs[0]?.stage).toBe('deleting')
+    expect(tables.source_documents[0]?.status).toBe('uploaded')
+  })
+
   test('queue failure race returns deleting instead of retrying when delete claim wins', async () => {
     const { env, tables } = createFakeD1Env(
       {
@@ -954,6 +1005,52 @@ describe('invoice review D1 integration', () => {
       }),
     ).resolves.toEqual({
       jobId: 'job-queue-failure-race',
+      stage: 'deleting',
+    })
+
+    expect(tables.intake_jobs[0]?.stage).toBe('deleting')
+    expect(tables.source_documents[0]?.status).toBe('uploaded')
+  })
+
+  test('queue failure source update is skipped if delete claim wins after error stage update', async () => {
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [
+          createSourceDocumentRow({
+            id: 'src-queue-error-source-race',
+            r2_key: 'raw-documents/2026/04/queue-error-source-race.pdf',
+            status: 'uploaded',
+          }),
+        ],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-queue-error-source-race',
+            source_document_id: 'src-queue-error-source-race',
+            stage: 'queued',
+          }),
+        ],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (sql.includes('invoice:queue-source-error')) {
+            currentTables.intake_jobs[0].stage = 'deleting'
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+
+    await expect(
+      processInvoiceIntakeQueueMessage(env, {
+        jobId: 'job-queue-error-source-race',
+        sourceDocumentId: 'src-queue-error-source-race',
+        r2Key: 'raw-documents/2026/04/queue-error-source-race.pdf',
+        fileName: 'queue-error-source-race.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      }),
+    ).resolves.toEqual({
+      jobId: 'job-queue-error-source-race',
       stage: 'deleting',
     })
 
@@ -1536,6 +1633,32 @@ class FakeD1PreparedStatement {
       }
 
       row.status = String(status)
+      return 1
+    }
+
+    if (
+      sql.includes('invoice:queue-source-processed') ||
+      sql.includes('invoice:queue-source-error')
+    ) {
+      const [sourceDocumentId, jobId] = this.params
+      const expectedStage = sql.includes('invoice:queue-source-processed')
+        ? 'needs_review'
+        : 'error'
+      const nextStatus = sql.includes('invoice:queue-source-processed')
+        ? 'processed'
+        : 'error'
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage === expectedStage,
+      )
+      const row = this.tables.source_documents.find(
+        (candidate) => candidate.id === sourceDocumentId,
+      )
+
+      if (!job || !row) {
+        return 0
+      }
+
+      row.status = nextStatus
       return 1
     }
 

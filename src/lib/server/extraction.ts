@@ -371,12 +371,24 @@ export async function processInvoiceIntakeQueueMessage(
       return getCurrentQueueStage(db, message.jobId)
     }
 
-    await db
-      .update(sourceDocuments)
-      .set({
-        status: 'processed',
-      })
-      .where(eq(sourceDocuments.id, message.sourceDocumentId))
+    const sourceProcessedResult = await env.DB.prepare(
+      `/* invoice:queue-source-processed */
+      UPDATE source_documents
+      SET status = 'processed'
+      WHERE id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'needs_review'
+        )`,
+    )
+      .bind(message.sourceDocumentId, message.jobId)
+      .run()
+
+    if ((sourceProcessedResult.meta?.changes ?? 0) === 0) {
+      return getCurrentQueueStage(db, message.jobId)
+    }
 
     return {
       jobId: message.jobId,
@@ -405,12 +417,29 @@ export async function processInvoiceIntakeQueueMessage(
       throw error
     }
 
-    await db
-      .update(sourceDocuments)
-      .set({
-        status: 'error',
-      })
-      .where(eq(sourceDocuments.id, message.sourceDocumentId))
+    const sourceErrorResult = await env.DB.prepare(
+      `/* invoice:queue-source-error */
+      UPDATE source_documents
+      SET status = 'error'
+      WHERE id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'error'
+        )`,
+    )
+      .bind(message.sourceDocumentId, message.jobId)
+      .run()
+
+    if ((sourceErrorResult.meta?.changes ?? 0) === 0) {
+      const currentStage = await getCurrentQueueStage(db, message.jobId)
+      if (currentStage.stage === 'deleting' || currentStage.stage === 'deleted') {
+        return currentStage
+      }
+
+      throw error
+    }
 
     throw error
   }
