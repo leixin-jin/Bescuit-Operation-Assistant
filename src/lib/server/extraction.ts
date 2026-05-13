@@ -311,27 +311,46 @@ export async function processInvoiceIntakeQueueMessage(
     const schemaVersion =
       extractionDraft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION
 
-    await db
-      .insert(extractionResults)
-      .values({
-        id: getExtractionResultId(message.jobId),
-        intakeJobId: message.jobId,
-        markdownText: extractionDraft.markdownText,
-        structuredJson: serializeExtractionDraft(extractionDraft),
-        rawResponse: extraction.rawResponse,
+    const extractionResult = await env.DB.prepare(
+      `/* invoice:queue-upsert-extraction */
+      INSERT INTO extraction_results (
+        id,
+        intake_job_id,
+        markdown_text,
+        structured_json,
+        raw_response,
+        schema_version,
+        created_at
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1
+        FROM intake_jobs
+        WHERE intake_jobs.id = ?
+          AND intake_jobs.stage = 'extracting'
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        markdown_text = excluded.markdown_text,
+        structured_json = excluded.structured_json,
+        raw_response = excluded.raw_response,
+        schema_version = excluded.schema_version,
+        created_at = excluded.created_at`,
+    )
+      .bind(
+        getExtractionResultId(message.jobId),
+        message.jobId,
+        extractionDraft.markdownText,
+        serializeExtractionDraft(extractionDraft),
+        extraction.rawResponse,
         schemaVersion,
-        createdAt: extractionStoredAt,
-      })
-      .onConflictDoUpdate({
-        target: extractionResults.id,
-        set: {
-          markdownText: extractionDraft.markdownText,
-          structuredJson: serializeExtractionDraft(extractionDraft),
-          rawResponse: extraction.rawResponse,
-          schemaVersion,
-          createdAt: extractionStoredAt,
-        },
-      })
+        extractionStoredAt,
+        message.jobId,
+      )
+      .run()
+
+    if ((extractionResult.meta?.changes ?? 0) === 0) {
+      return getCurrentQueueStage(db, message.jobId)
+    }
 
     const finishedAt = new Date().toISOString()
 

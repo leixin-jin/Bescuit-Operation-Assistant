@@ -412,6 +412,107 @@ describe('invoice review D1 integration', () => {
     expect(tables.ledger_entries).toHaveLength(0)
   })
 
+  test('confirming a job that becomes deleting before draft write preserves extraction data', async () => {
+    const existingStructuredJson = JSON.stringify({
+      header: {
+        supplier: 'Original Supplier',
+        invoiceNo: 'ORIGINAL-1',
+        date: '2026-04-19',
+        totalAmount: '10.00',
+        taxAmount: '1.00',
+        notes: 'Original notes',
+      },
+      lineItems: [],
+      markdownText: 'Original markdown',
+    })
+    const existingMarkdownText = 'Original markdown'
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [createSourceDocumentRow({ id: 'src-1' })],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-1',
+            source_document_id: 'src-1',
+            stage: 'needs_review',
+          }),
+        ],
+        extraction_results: [
+          {
+            id: 'ext-job-1',
+            intake_job_id: 'job-1',
+            markdown_text: existingMarkdownText,
+            structured_json: existingStructuredJson,
+            raw_response: null,
+            schema_version: 'invoice-extraction-v1',
+            created_at: '2026-04-27T10:00:00.000Z',
+          },
+        ],
+        ingredients: [createIngredientRow({ id: 'coke-330', name: 'Coke 330ml' })],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (sql.includes('invoice:update-extraction')) {
+            currentTables.intake_jobs[0].stage = 'deleting'
+          }
+        },
+      },
+    )
+
+    await expect(
+      confirmInvoiceReviewJobInDatabase(env, createReadyReviewJob()),
+    ).rejects.toThrow(/删除|deleting/i)
+
+    expect(tables.intake_jobs[0]?.stage).toBe('deleting')
+    expect(tables.extraction_results[0]?.structured_json).toBe(existingStructuredJson)
+    expect(tables.extraction_results[0]?.markdown_text).toBe(existingMarkdownText)
+    expect(tables.invoices).toHaveLength(0)
+    expect(tables.invoice_items).toHaveLength(0)
+    expect(tables.ledger_entries).toHaveLength(0)
+  })
+
+  test('confirming a job that becomes deleting before accounting writes no accounting rows', async () => {
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [createSourceDocumentRow({ id: 'src-1' })],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-1',
+            source_document_id: 'src-1',
+            stage: 'needs_review',
+          }),
+        ],
+        extraction_results: [
+          {
+            id: 'ext-job-1',
+            intake_job_id: 'job-1',
+            markdown_text: '',
+            structured_json: null,
+            raw_response: null,
+            schema_version: 'invoice-extraction-v1',
+            created_at: '2026-04-27T10:00:00.000Z',
+          },
+        ],
+        ingredients: [createIngredientRow({ id: 'coke-330', name: 'Coke 330ml' })],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (sql.includes('invoice:upsert-invoice')) {
+            currentTables.intake_jobs[0].stage = 'deleting'
+          }
+        },
+      },
+    )
+
+    await expect(
+      confirmInvoiceReviewJobInDatabase(env, createReadyReviewJob()),
+    ).rejects.toThrow(/删除|deleting/i)
+
+    expect(tables.intake_jobs[0]?.stage).toBe('deleting')
+    expect(tables.invoices).toHaveLength(0)
+    expect(tables.invoice_items).toHaveLength(0)
+    expect(tables.ledger_entries).toHaveLength(0)
+  })
+
   test('deleting an unfinished intake job deletes extraction rows, D1 records, and the R2 object', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [
@@ -748,6 +849,61 @@ describe('invoice review D1 integration', () => {
       }),
     ).resolves.toEqual({
       jobId: 'job-queue-race',
+      stage: 'deleting',
+    })
+
+    expect(tables.intake_jobs[0]?.stage).toBe('deleting')
+    expect(tables.extraction_results).toHaveLength(0)
+    expect(tables.source_documents[0]?.status).toBe('uploaded')
+  })
+
+  test('queue extraction insert is skipped if job becomes deleting after the success recheck', async () => {
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [
+          createSourceDocumentRow({
+            id: 'src-queue-insert-race',
+            r2_key: 'raw-documents/2026/04/queue-insert-race.pdf',
+            status: 'uploaded',
+          }),
+        ],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-queue-insert-race',
+            source_document_id: 'src-queue-insert-race',
+            stage: 'queued',
+          }),
+        ],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (
+            sql.includes('invoice:queue-upsert-extraction') ||
+            sql.includes('insert into "extraction_results"')
+          ) {
+            currentTables.intake_jobs[0].stage = 'deleting'
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/queue-insert-race.pdf': {
+        body: '%PDF-queue-insert-race',
+        contentType: 'application/pdf',
+      },
+    })
+
+    await expect(
+      processInvoiceIntakeQueueMessage(env, {
+        jobId: 'job-queue-insert-race',
+        sourceDocumentId: 'src-queue-insert-race',
+        r2Key: 'raw-documents/2026/04/queue-insert-race.pdf',
+        fileName: 'queue-insert-race.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      }),
+    ).resolves.toEqual({
+      jobId: 'job-queue-insert-race',
       stage: 'deleting',
     })
 
@@ -1176,19 +1332,27 @@ class FakeD1PreparedStatement {
     }
 
     if (sql.includes('invoice:update-extraction')) {
-      const [structuredJson, markdownText, rawResponse, schemaVersion, extractionId] =
-        this.params
+      const [
+        structuredJson,
+        markdownText,
+        rawResponse,
+        schemaVersion,
+        extractionId,
+        jobId,
+      ] = this.params
+      const job = this.tables.intake_jobs.find((candidate) => candidate.id === jobId)
       const row = this.tables.extraction_results.find(
         (candidate) => candidate.id === extractionId,
       )
 
-      if (row) {
+      if (row && (!sql.includes('stage !=') || job?.stage !== 'deleting')) {
         row.structured_json = String(structuredJson)
         row.markdown_text = String(markdownText)
         row.raw_response = String(rawResponse)
         row.schema_version = String(schemaVersion)
+        return 1
       }
-      return row ? 1 : 0
+      return 0
     }
 
     if (sql.includes('invoice:insert-extraction')) {
@@ -1200,7 +1364,14 @@ class FakeD1PreparedStatement {
         rawResponse,
         schemaVersion,
         createdAt,
+        jobId,
       ] = this.params
+      const job = this.tables.intake_jobs.find((candidate) => candidate.id === jobId)
+
+      if (sql.includes('stage !=') && job?.stage === 'deleting') {
+        return 0
+      }
+
       this.tables.extraction_results.push({
         id: String(id),
         intake_job_id: String(intakeJobId),
@@ -1210,6 +1381,44 @@ class FakeD1PreparedStatement {
         schema_version: String(schemaVersion),
         created_at: String(createdAt),
       })
+      return 1
+    }
+
+    if (sql.includes('invoice:queue-upsert-extraction')) {
+      const [
+        id,
+        intakeJobId,
+        markdownText,
+        structuredJson,
+        rawResponse,
+        schemaVersion,
+        createdAt,
+        jobId,
+      ] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage === 'extracting',
+      )
+
+      if (!job) {
+        return 0
+      }
+
+      const existingRow = this.tables.extraction_results.find((row) => row.id === id)
+      const nextRow: ExtractionResultRow = {
+        id: String(id),
+        intake_job_id: String(intakeJobId),
+        markdown_text: markdownText === null ? null : String(markdownText),
+        structured_json: structuredJson === null ? null : String(structuredJson),
+        raw_response: rawResponse === null ? null : String(rawResponse),
+        schema_version: schemaVersion === null ? null : String(schemaVersion),
+        created_at: String(createdAt),
+      }
+
+      if (existingRow) {
+        Object.assign(existingRow, nextRow, { intake_job_id: existingRow.intake_job_id })
+      } else {
+        this.tables.extraction_results.push(nextRow)
+      }
       return 1
     }
 
@@ -1364,7 +1573,16 @@ class FakeD1PreparedStatement {
         totalAmount,
         sourceDocumentId,
         now,
+        guardJobId,
       ] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === guardJobId && candidate.stage === 'ready',
+      )
+
+      if (!job) {
+        return 0
+      }
+
       const existingRow = this.tables.invoices.find((row) => row.id === id)
       const nextRow: InvoiceRow = {
         id: String(id),
