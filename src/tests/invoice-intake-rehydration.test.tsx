@@ -115,7 +115,7 @@ describe('invoice intake route hydration', () => {
   test('client rehydrates recent jobs after the loader misses session-backed data', async () => {
     await renderRoute('/invoices/new')
 
-    expect(await screen.findByRole('heading', { name: '发票 intake' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '发票核对' })).toBeTruthy()
 
     await waitFor(() => {
       expect(screen.getByText('rehydrated-intake.pdf')).toBeTruthy()

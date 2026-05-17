@@ -139,7 +139,7 @@ describe('phase 1-4 smoke tests', () => {
       expect(router.state.location.pathname).toBe('/invoices/new')
     })
 
-    expect(await screen.findByRole('heading', { name: '发票 intake' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '发票核对' })).toBeTruthy()
   })
 
   test('sales entry page derives efectivo from total minus card channels', async () => {

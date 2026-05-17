@@ -28,7 +28,6 @@ import { Button } from '@/components/ui/button'
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
@@ -112,7 +111,7 @@ function InvoiceIntakePage() {
     },
     onError: (error) => {
       setFileErrorMessage(
-        error instanceof Error ? error.message : '创建 intake 任务失败。',
+        error instanceof Error ? error.message : '创建任务失败。',
       )
     },
   })
@@ -180,7 +179,7 @@ function InvoiceIntakePage() {
                   ...currentFile,
                   status: 'error',
                   errorMessage:
-                    error instanceof Error ? error.message : '创建 intake 任务失败。',
+                    error instanceof Error ? error.message : '创建任务失败。',
                 }
               : currentFile,
           ),
@@ -226,16 +225,13 @@ function InvoiceIntakePage() {
             返回首页
           </Link>
           <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-2xl font-bold">发票 intake</h1>
-            <Badge variant="secondary" className="rounded-lg">
-              {pipelineEnabled ? 'Phase 6 异步链路' : 'Phase 5 本地版'}
-            </Badge>
+            <h1 className="text-2xl font-bold">发票核对</h1>
+            {!pipelineEnabled ? (
+              <Badge variant="secondary" className="rounded-lg">
+                Phase 5 本地版
+              </Badge>
+            ) : null}
           </div>
-          <p className="mt-1 text-muted-foreground">
-            {pipelineEnabled
-              ? '当前页面会把文件写入 R2、登记 source document、创建 intake job，并投递到 Queue。'
-              : '当前页面只负责选择文件、创建 intake job，并跳转到指定任务的 review 工作台。'}
-          </p>
         </div>
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
@@ -245,11 +241,6 @@ function InvoiceIntakePage() {
                 <Camera className="h-4 w-4" />
                 上传发票
               </CardTitle>
-              <CardDescription>
-                {pipelineEnabled
-                  ? '上传顺序固定为 R2 -> source_documents -> intake_jobs -> Queue。'
-                  : '当前通过 query/mutation 边界管理 intake job，后续可直接切换到真实 D1。'}
-              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="rounded-2xl border border-dashed border-muted-foreground/25 bg-muted/30 p-6">
@@ -366,7 +357,7 @@ function InvoiceIntakePage() {
                   onClick={() => void handleCreateJobs()}
                 >
                   <Camera className="mr-2 h-4 w-4" />
-                  {createJobMutation.isPending ? '创建中...' : '创建 intake 任务'}
+                  {createJobMutation.isPending ? '创建中...' : '创建任务'}
                 </Button>
                 {recentJobs[0] ? (
                   <Button variant="secondary" className="flex-1 rounded-lg" asChild>
@@ -391,9 +382,6 @@ function InvoiceIntakePage() {
           <Card className="rounded-xl">
             <CardHeader>
               <CardTitle className="text-base">最近任务</CardTitle>
-              <CardDescription>
-                route 只消费查询结果，任务状态由统一的数据边界返回。
-              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               {recentJobs.length > 0 ? (
@@ -468,7 +456,7 @@ function InvoiceIntakePage() {
                 })
               ) : (
                 <div className="rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">
-                  当前还没有 intake job。
+                  当前还没有任务
                 </div>
               )}
             </CardContent>
