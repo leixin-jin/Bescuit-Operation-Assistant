@@ -91,7 +91,7 @@ function HomePage() {
                 <CardContent>
                   <Button className="w-full rounded-lg">
                     <Camera className="mr-2 h-4 w-4" />
-                    开始 intake
+                    开始输入
                   </Button>
                 </CardContent>
               </Card>
