@@ -263,7 +263,14 @@ function InvoiceReviewWorkbenchPage() {
                       </Link>
                       <div className="flex flex-wrap items-center gap-3">
                         <h1 className="text-xl font-bold">发票核对</h1>
-                        <Badge variant="secondary" className="rounded-lg">
+                        <Badge
+                          variant="secondary"
+                          className={
+                            editableJob.status === 'ready'
+                              ? 'rounded-lg bg-emerald-100 text-emerald-700'
+                              : 'rounded-lg'
+                          }
+                        >
                           {getInvoiceStatusLabel(editableJob.status)}
                         </Badge>
                         <Badge variant="outline" className="rounded-lg">

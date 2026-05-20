@@ -195,7 +195,7 @@ export function getInvoiceStatusLabel(status: InvoiceJobStatus) {
     case 'error':
       return '处理失败'
     case 'ready':
-      return '可入账'
+      return '已入账'
     default:
       return '待核对'
   }
