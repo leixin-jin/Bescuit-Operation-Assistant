@@ -113,7 +113,7 @@ describe('invoice review route hydration', () => {
     await renderRoute('/invoices/review/rehydrated-review-job')
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: '发票 review 工作台' })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '发票核对' })).toBeTruthy()
     })
 
     expect(screen.getAllByText(/rehydrated-review\.pdf/).length).toBeGreaterThan(0)
@@ -123,7 +123,7 @@ describe('invoice review route hydration', () => {
     await renderRoute('/invoices/review/review-tax-inclusive-job')
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: '发票 review 工作台' })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '发票核对' })).toBeTruthy()
     })
 
     expect(screen.getByText('IVA')).toBeInTheDocument()
@@ -139,7 +139,7 @@ describe('invoice review route hydration', () => {
     await renderRoute('/invoices/review/review-tax-inclusive-job')
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: '发票 review 工作台' })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '发票核对' })).toBeTruthy()
     })
 
     fireEvent.change(screen.getByDisplayValue('25.61'), {

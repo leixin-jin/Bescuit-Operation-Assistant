@@ -222,7 +222,7 @@ function InvoiceReviewWorkbenchPage() {
               该任务不存在，或者不在当前浏览器会话中。
             </p>
             <Button className="mt-4 rounded-lg" asChild>
-              <Link to="/invoices/new">返回 intake</Link>
+              <Link to="/invoices/new">返回</Link>
             </Button>
           </div>
         </div>
@@ -259,10 +259,10 @@ function InvoiceReviewWorkbenchPage() {
                         className="mb-3 inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
                       >
                         <ArrowLeft className="h-4 w-4" />
-                        返回 intake
+                        返回
                       </Link>
                       <div className="flex flex-wrap items-center gap-3">
-                        <h1 className="text-xl font-bold">发票 review 工作台</h1>
+                        <h1 className="text-xl font-bold">发票核对</h1>
                         <Badge variant="secondary" className="rounded-lg">
                           {getInvoiceStatusLabel(editableJob.status)}
                         </Badge>
@@ -341,12 +341,6 @@ function InvoiceReviewWorkbenchPage() {
                       {editableJob.extraction ? (
                         <div className="rounded-xl border bg-background p-4">
                           <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant="outline" className="rounded-lg">
-                              {editableJob.extraction.provider}
-                            </Badge>
-                            <Badge variant="outline" className="rounded-lg">
-                              {editableJob.extraction.model}
-                            </Badge>
                             <Badge variant="secondary" className="rounded-lg">
                               置信度{' '}
                               {formatConfidence(editableJob.extraction.overallConfidence)}

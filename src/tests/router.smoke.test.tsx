@@ -256,7 +256,7 @@ describe('phase 1-4 smoke tests', () => {
 
     await renderRoute(`/invoices/review/${job.jobId}`)
 
-    expect(await screen.findByRole('heading', { name: '发票 review 工作台' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '发票核对' })).toBeTruthy()
     expect(screen.getByText('文档预览')).toBeTruthy()
     expect(screen.getByText('发票信息')).toBeTruthy()
     expect(screen.getByText('行项目')).toBeTruthy()
