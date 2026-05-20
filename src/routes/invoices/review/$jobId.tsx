@@ -338,15 +338,6 @@ function InvoiceReviewWorkbenchPage() {
 
                   <div className="flex h-[55%] flex-col lg:h-full lg:w-[44%]">
                     <div className="flex-1 space-y-6 overflow-auto p-6">
-                      {editableJob.extraction?.warnings.length ? (
-                        <div className="rounded-xl border bg-background p-4">
-                          <div className="space-y-1 text-sm text-amber-700">
-                            {editableJob.extraction.warnings.map((warning) => (
-                              <p key={warning}>· {warning}</p>
-                            ))}
-                          </div>
-                        </div>
-                      ) : null}
                       <ReviewHeaderForm
                         header={editableJob.header}
                         disabled={isPipelineJobProcessing}
