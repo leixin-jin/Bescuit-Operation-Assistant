@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
 import { describe, expect, test, vi } from 'vitest'
 
-import { createInvoiceJob } from '@/features/invoices/mock-store'
+import { createInvoiceJob, saveInvoiceJob } from '@/features/invoices/mock-store'
 import { routeTree } from '@/routeTree.gen'
 
 const analyticsMocks = vi.hoisted(() => ({
@@ -140,6 +140,34 @@ describe('phase 1-4 smoke tests', () => {
     })
 
     expect(await screen.findByRole('heading', { name: '发票核对' })).toBeTruthy()
+  })
+
+  test('invoice intake recent tasks show booked jobs with a green status badge', async () => {
+    const job = await createInvoiceJob('booked-upload.pdf')
+    await saveInvoiceJob({
+      ...job,
+      stage: 'ready',
+      status: 'ready',
+      header: {
+        supplier: 'VINOS ISABEL MARIA CRUSAT SA',
+        invoiceNo: 'FP26020968',
+        date: '2026-04-21',
+        totalAmount: '106.67',
+        taxAmount: '18.51',
+        notes: '',
+      },
+    })
+
+    await renderRoute('/invoices/new')
+
+    const taskCard = screen.getByText('booked-upload.pdf').closest('div')
+    expect(taskCard).toBeTruthy()
+    const bookedBadge = Array.from(taskCard!.querySelectorAll('[data-slot="badge"]')).find(
+      (element) => element.textContent === '已入账',
+    )
+    expect(bookedBadge).toBeTruthy()
+    expect(bookedBadge!.className).toContain('bg-emerald-100')
+    expect(bookedBadge!.className).toContain('text-emerald-700')
   })
 
   test('sales entry page derives efectivo from total minus card channels', async () => {

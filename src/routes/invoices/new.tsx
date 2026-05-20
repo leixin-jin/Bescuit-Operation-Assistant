@@ -410,7 +410,14 @@ function InvoiceIntakePage() {
                         </span>
                       </Link>
                       <div className="flex shrink-0 items-center gap-2">
-                        <Badge variant="secondary" className="rounded-lg">
+                        <Badge
+                          variant="secondary"
+                          className={
+                            job.status === 'ready'
+                              ? 'rounded-lg bg-emerald-100 text-emerald-700'
+                              : 'rounded-lg'
+                          }
+                        >
                           {getInvoiceStatusLabel(job.status)}
                         </Badge>
                         {canDelete ? (

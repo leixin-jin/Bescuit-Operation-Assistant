@@ -47,6 +47,43 @@ vi.mock('@/lib/server/queries/invoices', async () => {
         }
       }
 
+      if (jobId === 'booked-review-job') {
+        return {
+          job: {
+            jobId,
+            fileName: 'booked-review.pdf',
+            uploadedAt: '2026-04-24T11:00:00.000Z',
+            pageCount: 1,
+            status: 'ready' as const,
+            stage: 'ready' as const,
+            errorMessage: null,
+            header: {
+              supplier: 'VINOS ISABEL MARIA CRUSAT SA',
+              invoiceNo: 'FP26020968',
+              date: '2026-04-21',
+              totalAmount: '106.67',
+              taxAmount: '18.51',
+              notes: '',
+            },
+            lineItems: [
+              {
+                id: 'line-booked-1',
+                name: 'ESTRELLA GALICIA 24x33 cl. RET',
+                qty: '4.00',
+                unit: 'unidad',
+                unitPrice: '25.61',
+                lineTotal: '102.45',
+                taxRate: '21%',
+                notes: '',
+                ingredient: '',
+                matched: false,
+              },
+            ],
+          },
+          ingredientOptions: actual.ingredientOptions,
+        }
+      }
+
       return {
         job: {
           jobId,
@@ -133,6 +170,18 @@ describe('invoice review route hydration', () => {
     expect(screen.getByText('Descuento: 42,33')).toBeInTheDocument()
     expect(screen.queryByText('原料映射')).not.toBeInTheDocument()
     expect(screen.queryByText(/未映射到原料库/)).not.toBeInTheDocument()
+  })
+
+  test('shows booked review jobs with a green header status badge', async () => {
+    await renderRoute('/invoices/review/booked-review-job')
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '发票核对' })).toBeTruthy()
+    })
+
+    const bookedBadge = screen.getByText('已入账')
+    expect(bookedBadge.className).toContain('bg-emerald-100')
+    expect(bookedBadge.className).toContain('text-emerald-700')
   })
 
   test('recalculates line total display after quantity or unit price edits', async () => {

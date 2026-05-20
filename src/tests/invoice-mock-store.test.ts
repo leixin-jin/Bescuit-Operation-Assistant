@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, test } from 'vitest'
 import {
   createInvoiceJob,
   deleteInvoiceJob,
+  getStatusLabel,
   getInvoiceJob,
   getInvoiceReadinessSummary,
   listInvoiceJobs,
@@ -14,6 +15,10 @@ import {
 describe('invoice mock store', () => {
   beforeEach(() => {
     window.sessionStorage.clear()
+  })
+
+  test('ready invoice jobs are labelled as booked', () => {
+    expect(getStatusLabel('ready')).toBe('已入账')
   })
 
   test('unknown job ids do not create new records', async () => {
