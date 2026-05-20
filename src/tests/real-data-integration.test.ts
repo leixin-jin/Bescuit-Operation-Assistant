@@ -348,8 +348,8 @@ describe('invoice review D1 integration', () => {
     expect(tables.invoice_items[0]).toMatchObject({
       invoice_id: tables.invoices[0]?.id,
       raw_product_name: 'Coke 330ml',
-      ingredient_id: 'coke-330',
-      mapping_status: 'matched',
+      ingredient_id: null,
+      mapping_status: 'unmatched',
     })
     expect(tables.ledger_entries).toHaveLength(1)
     expect(tables.ledger_entries[0]).toMatchObject({
@@ -360,6 +360,100 @@ describe('invoice review D1 integration', () => {
       vendor: 'Makro Madrid',
       source_kind: 'invoice',
       source_id: tables.invoices[0]?.id,
+    })
+  })
+
+  test('confirming an invoice no longer requires ingredient mapping and preserves stored tax-included totals', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [createSourceDocumentRow({ id: 'src-tax-included' })],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-tax-included',
+          source_document_id: 'src-tax-included',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        {
+          id: 'ext_job-tax-included',
+          intake_job_id: 'job-tax-included',
+          markdown_text: '',
+          structured_json: JSON.stringify({
+            schemaVersion: 'invoice-extraction-v2',
+            pageCount: 1,
+            documentKind: 'pdf',
+            header: {
+              supplier: 'VINOS ISABEL MARIA CRUSAT SA',
+              invoiceNo: 'FP26020968',
+              date: '2026-04-21',
+              totalAmount: '106.67',
+              taxAmount: '18.51',
+              notes: '',
+            },
+            lineItems: [
+              {
+                id: '802',
+                name: 'ESTRELLA GALICIA 24x33 cl. RET',
+                qty: '4.00',
+                unit: 'un',
+                unitPrice: '25.61',
+                lineTotal: '102.45',
+                taxRate: '21%',
+                notes: 'Descuento: 42,33',
+                ingredient: '',
+                matched: false,
+              },
+            ],
+            markdownText: '',
+            provider: 'gemini',
+            model: 'gemini-3.1-flash-lite',
+          }),
+          raw_response: null,
+          schema_version: 'invoice-extraction-v2',
+          created_at: '2026-04-21T10:00:00.000Z',
+        },
+      ],
+    })
+
+    const result = await confirmInvoiceReviewJobInDatabase(env, {
+      jobId: 'job-tax-included',
+      fileName: 'Factura venta FP26020968.pdf',
+      uploadedAt: '2026-04-21T10:00:00.000Z',
+      pageCount: 1,
+      status: 'needs_review',
+      stage: 'needs_review',
+      errorMessage: null,
+      header: {
+        supplier: 'VINOS ISABEL MARIA CRUSAT SA',
+        invoiceNo: 'FP26020968',
+        date: '2026-04-21',
+        totalAmount: '106.67',
+        taxAmount: '18.51',
+        notes: '',
+      },
+      lineItems: [
+        {
+          id: '802',
+          name: 'ESTRELLA GALICIA 24x33 cl. RET',
+          qty: '4.00',
+          unit: 'un',
+          unitPrice: '25.61',
+          lineTotal: '102.45',
+          taxRate: '21%',
+          notes: 'Descuento: 42,33',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.readinessSummary.isReady).toBe(true)
+    expect(tables.invoice_items[0]).toMatchObject({
+      raw_unit_price: 25.61,
+      raw_line_total: 102.45,
+      ingredient_id: null,
+      mapping_status: 'unmatched',
     })
   })
 

@@ -45,6 +45,11 @@ export type InvoiceIntakeStage =
 
 export interface InvoiceHeaderDraft {
   supplier: string
+  supplierTaxId?: string
+  supplierAddress?: string
+  customerName?: string
+  customerTaxId?: string
+  customerAddress?: string
   invoiceNo: string
   date: string
   totalAmount: string
@@ -60,6 +65,7 @@ export interface InvoiceLineItemDraft {
   unitPrice: string
   lineTotal?: string
   taxRate?: string
+  notes?: string
   ingredient: string
   matched: boolean
   confidence?: number
@@ -276,16 +282,12 @@ export function getInvoiceReadinessSummary(
 ): InvoiceReadinessSummary {
   const missingHeaderFields = getMissingRequiredHeaderFields(job.header)
   const invalidHeaderFields = getInvalidHeaderFields(job.header)
-  const unmatchedLineItems = job.lineItems.filter((item) => !item.matched).length
 
   return {
-    isReady:
-      missingHeaderFields.length === 0 &&
-      invalidHeaderFields.length === 0 &&
-      unmatchedLineItems === 0,
+    isReady: missingHeaderFields.length === 0 && invalidHeaderFields.length === 0,
     missingHeaderFields,
     invalidHeaderFields,
-    unmatchedLineItems,
+    unmatchedLineItems: 0,
   }
 }
 
@@ -370,4 +372,4 @@ function getMonthKey(date: string) {
   return date.slice(0, 7)
 }
 
-type RequiredInvoiceHeaderField = Exclude<keyof InvoiceHeaderDraft, 'notes'>
+type RequiredInvoiceHeaderField = 'supplier' | 'invoiceNo' | 'date' | 'totalAmount' | 'taxAmount'

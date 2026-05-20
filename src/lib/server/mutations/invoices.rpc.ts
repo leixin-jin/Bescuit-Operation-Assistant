@@ -246,7 +246,8 @@ async function persistInvoiceReviewDraft(
   const latestDraft = await getLatestExtractionDraft(db, job.jobId, job.fileName)
   const nextLineItems = job.lineItems.map((item) => ({
     ...item,
-    matched: Boolean(item.ingredient.trim()),
+    ingredient: '',
+    matched: false,
   }))
   const nextDraft: InvoiceExtractionDraft = {
     ...latestDraft,
@@ -454,7 +455,8 @@ async function writeConfirmedInvoiceAccounting(
           parseOptionalCurrencyAmount(item.qty),
           item.unit.trim() || null,
           parseOptionalCurrencyAmount(item.unitPrice),
-          calculateLineTotal(item.qty, item.unitPrice),
+          parseOptionalCurrencyAmount(item.lineTotal ?? '') ??
+            calculateLineTotal(item.qty, item.unitPrice),
           item.ingredient.trim() || null,
           parseOptionalCurrencyAmount(item.qty),
           item.unit.trim() || null,

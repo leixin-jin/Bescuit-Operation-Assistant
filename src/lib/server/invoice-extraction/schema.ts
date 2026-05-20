@@ -20,6 +20,11 @@ export const invoiceExtractionResponseJsonSchema = {
       type: 'object',
       properties: {
         supplier: { type: 'string' },
+        supplierTaxId: { type: 'string' },
+        supplierAddress: { type: 'string' },
+        customerName: { type: 'string' },
+        customerTaxId: { type: 'string' },
+        customerAddress: { type: 'string' },
         invoiceNo: { type: 'string' },
         date: { type: 'string' },
         subtotalAmount: { type: 'string' },
@@ -51,6 +56,7 @@ export const invoiceExtractionResponseJsonSchema = {
           unitPrice: { type: 'string' },
           lineTotal: { type: 'string' },
           taxRate: { type: 'string' },
+          notes: { type: 'string' },
           ingredient: { type: 'string' },
           matched: { type: 'boolean' },
           confidence: { type: 'number' },
@@ -128,6 +134,11 @@ export const invoiceExtractionDraftV2Schema = z.object({
   documentKind: z.enum(['pdf', 'image', 'mixed', 'unknown']),
   header: z.object({
     supplier: z.string(),
+    supplierTaxId: z.string().optional(),
+    supplierAddress: z.string().optional(),
+    customerName: z.string().optional(),
+    customerTaxId: z.string().optional(),
+    customerAddress: z.string().optional(),
     invoiceNo: z.string(),
     date: z.string(),
     subtotalAmount: z.string(),
@@ -145,6 +156,7 @@ export const invoiceExtractionDraftV2Schema = z.object({
       unitPrice: z.string(),
       lineTotal: z.string(),
       taxRate: z.string().optional(),
+      notes: z.string().optional(),
       ingredient: z.string(),
       matched: z.boolean(),
       confidence: z.number().min(0).max(1).optional(),
@@ -319,24 +331,61 @@ export function normalizeV2Draft(
   fileName: string,
 ): InvoiceExtractionDraft {
   const pendingHeader = createFallbackHeader(fileName)
-  const normalizedLineItems = draft.lineItems.map((item, index) => ({
-    id: item.id.trim() || `${slugifyText(fileName)}-${index + 1}`,
-    name: item.name.trim(),
-    qty: normalizeNumberText(item.qty),
-    unit: item.unit.trim(),
-    unitPrice: normalizeMoneyValue(item.unitPrice),
-    lineTotal: normalizeMoneyValue(item.lineTotal),
-    taxRate: item.taxRate?.trim(),
-    ingredient: item.ingredient.trim(),
-    matched: Boolean(item.ingredient.trim()) || item.matched,
-    confidence: item.confidence,
-    sourceText: item.sourceText?.trim(),
-  }))
+  const totalAmount = normalizeMoneyValue(draft.header.totalAmount)
+  const subtotalAmount = normalizeMoneyValue(draft.header.subtotalAmount)
+  const lineTotalCandidates = draft.lineItems.map((item) => {
+    const normalizedLineTotal = normalizeMoneyValue(item.lineTotal)
+    const grossedLineTotal = calculateTaxIncludedLineTotal(
+      normalizedLineTotal,
+      item.taxRate,
+    )
+
+    return {
+      rawLineTotal: normalizedLineTotal,
+      grossedLineTotal,
+    }
+  })
+  const shouldGrossLineTotals = shouldGrossLineTotalsFromTax({
+    subtotalAmount,
+    totalAmount,
+    lineTotalCandidates,
+  })
+  const normalizedLineItems = draft.lineItems.map((item, index) => {
+    const taxIncludedLineTotal = shouldGrossLineTotals
+      ? lineTotalCandidates[index]?.grossedLineTotal ?? ''
+      : lineTotalCandidates[index]?.rawLineTotal ?? ''
+    const normalizedQty = normalizeNumberText(item.qty)
+
+    return {
+      id: item.id.trim() || `${slugifyText(fileName)}-${index + 1}`,
+      name: item.name.trim(),
+      qty: normalizedQty,
+      unit: item.unit.trim(),
+      unitPrice: calculateTaxIncludedUnitPrice({
+        qty: normalizedQty,
+        unitPrice: normalizeMoneyValue(item.unitPrice),
+        lineTotal: taxIncludedLineTotal,
+        taxRate: shouldGrossLineTotals ? item.taxRate : undefined,
+      }),
+      lineTotal: taxIncludedLineTotal,
+      taxRate: item.taxRate?.trim(),
+      notes: item.notes?.trim() || undefined,
+      ingredient: '',
+      matched: false,
+      confidence: item.confidence,
+      sourceText: item.sourceText?.trim(),
+    }
+  })
   const header = {
     supplier: draft.header.supplier.trim() || pendingHeader.supplier,
+    supplierTaxId: draft.header.supplierTaxId?.trim(),
+    supplierAddress: draft.header.supplierAddress?.trim(),
+    customerName: draft.header.customerName?.trim(),
+    customerTaxId: draft.header.customerTaxId?.trim(),
+    customerAddress: draft.header.customerAddress?.trim(),
     invoiceNo: draft.header.invoiceNo.trim(),
     date: draft.header.date.trim() || pendingHeader.date,
-    totalAmount: normalizeMoneyValue(draft.header.totalAmount),
+    totalAmount,
     taxAmount: normalizeMoneyValue(draft.header.taxAmount),
     notes: draft.header.notes.trim(),
   }
@@ -357,6 +406,62 @@ export function normalizeV2Draft(
   }
 }
 
+function shouldGrossLineTotalsFromTax(input: {
+  subtotalAmount: string
+  totalAmount: string
+  lineTotalCandidates: Array<{
+    rawLineTotal: string
+    grossedLineTotal: string
+  }>
+}) {
+  const subtotalAmount = parseMoney(input.subtotalAmount)
+  const totalAmount = parseMoney(input.totalAmount)
+  const rawLineTotalSum = sumMoneyValues(
+    input.lineTotalCandidates.map((item) => item.rawLineTotal),
+  )
+  if (rawLineTotalSum <= 0) {
+    return false
+  }
+
+  const grossedLineTotalSum = sumMoneyValues(
+    input.lineTotalCandidates.map((item) => item.grossedLineTotal),
+  )
+  const rawTotalDelta =
+    totalAmount === null ? null : Math.abs(rawLineTotalSum - totalAmount)
+  const grossedTotalDelta =
+    totalAmount === null ? null : Math.abs(grossedLineTotalSum - totalAmount)
+
+  if (
+    rawTotalDelta !== null &&
+    grossedTotalDelta !== null &&
+    rawTotalDelta <= 0.05 &&
+    rawTotalDelta <= grossedTotalDelta
+  ) {
+    return false
+  }
+
+  const rawSubtotalDelta =
+    subtotalAmount === null ? null : Math.abs(rawLineTotalSum - subtotalAmount)
+  if (rawSubtotalDelta !== null && rawSubtotalDelta <= 0.05) {
+    return (
+      grossedTotalDelta === null ||
+      grossedTotalDelta <= 0.05 ||
+      (rawTotalDelta !== null && grossedTotalDelta < rawTotalDelta)
+    )
+  }
+
+  return (
+    rawTotalDelta !== null &&
+    grossedTotalDelta !== null &&
+    grossedTotalDelta <= 0.05 &&
+    grossedTotalDelta < rawTotalDelta
+  )
+}
+
+function sumMoneyValues(values: string[]) {
+  return values.reduce((sum, value) => sum + (parseMoney(value) ?? 0), 0)
+}
+
 function appendTotalWarnings(
   warnings: string[],
   header: InvoiceHeaderDraft,
@@ -364,20 +469,15 @@ function appendTotalWarnings(
 ) {
   const nextWarnings = [...warnings]
   const totalAmount = parseMoney(header.totalAmount)
-  const taxAmount = parseMoney(header.taxAmount)
-  const lineTotalSum = lineItems.reduce(
-    (sum, item) => sum + (parseMoney(item.lineTotal ?? '') ?? 0),
-    0,
-  )
+  const lineTotalSum = sumMoneyValues(lineItems.map((item) => item.lineTotal ?? ''))
 
   if (
     totalAmount !== null &&
-    taxAmount !== null &&
     lineTotalSum > 0 &&
-    Math.abs(lineTotalSum + taxAmount - totalAmount) > 0.05
+    Math.abs(lineTotalSum - totalAmount) > 0.05
   ) {
     nextWarnings.push(
-      `行项目合计 ${lineTotalSum.toFixed(2)} + 税额 ${taxAmount.toFixed(2)} 与总额 ${totalAmount.toFixed(2)} 不一致。`,
+      `行项目含税合计 ${lineTotalSum.toFixed(2)} 与总额 ${totalAmount.toFixed(2)} 不一致。`,
     )
   }
 
@@ -419,6 +519,69 @@ function parseMoney(value: string) {
 
   const parsed = Number.parseFloat(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+function parseTaxRate(value: string | undefined) {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  const normalized = trimmed.replace(',', '.')
+  const percentage = normalized.match(/(\d+(?:\.\d+)?)/)?.[1]
+  if (!percentage) {
+    return null
+  }
+
+  const parsed = Number.parseFloat(percentage)
+  if (!Number.isFinite(parsed)) {
+    return null
+  }
+
+  return normalized.includes('%') || parsed > 1 ? parsed / 100 : parsed
+}
+
+function formatMoney(value: number) {
+  return (Math.round(value * 100) / 100).toFixed(2)
+}
+
+function calculateTaxIncludedLineTotal(lineTotal: string, taxRate: string | undefined) {
+  const parsedLineTotal = parseMoney(lineTotal)
+  const parsedTaxRate = parseTaxRate(taxRate)
+
+  if (parsedLineTotal === null) {
+    return ''
+  }
+
+  if (parsedTaxRate === null) {
+    return formatMoney(parsedLineTotal)
+  }
+
+  return formatMoney(parsedLineTotal * (1 + parsedTaxRate))
+}
+
+function calculateTaxIncludedUnitPrice(input: {
+  qty: string
+  unitPrice: string
+  lineTotal: string
+  taxRate?: string
+}) {
+  const quantity = parseMoney(input.qty)
+  const taxIncludedLineTotal = parseMoney(input.lineTotal)
+
+  if (quantity !== null && quantity > 0 && taxIncludedLineTotal !== null) {
+    return formatMoney(taxIncludedLineTotal / quantity)
+  }
+
+  const parsedUnitPrice = parseMoney(input.unitPrice)
+  const parsedTaxRate = parseTaxRate(input.taxRate)
+  if (parsedUnitPrice === null) {
+    return ''
+  }
+
+  return formatMoney(
+    parsedTaxRate === null ? parsedUnitPrice : parsedUnitPrice * (1 + parsedTaxRate),
+  )
 }
 
 function normalizeNumberText(value: string) {

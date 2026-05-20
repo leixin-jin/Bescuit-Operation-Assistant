@@ -86,6 +86,15 @@ describe('invoice extraction helpers', () => {
       })
 
       const requestBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)
+      const promptText = requestBody.contents[0].parts
+        .map((part: { text?: string }) => part.text ?? '')
+        .join('\n')
+
+      expect(promptText).toContain('tax-included')
+      expect(promptText).toContain('lineItems[].notes')
+      expect(promptText).toContain('lineItems[].taxRate')
+      expect(promptText).toContain('lineTotal = net line total * (1 + IVA rate)')
+      expect(promptText).toContain('ingredient must be an empty string')
       expect(requestBody.generationConfig).toMatchObject({
         responseMimeType: 'application/json',
         responseSchema: expect.objectContaining({
@@ -189,6 +198,339 @@ describe('invoice extraction helpers', () => {
         { pageNumber: 1, kind: 'pdf-page' },
         { pageNumber: 2, kind: 'pdf-page' },
       ],
+    })
+  })
+
+  test('normalizes FP26020968 line items to tax-included unit and total prices', () => {
+    const draft = parseProviderExtractionResponse({
+      rawJson: JSON.stringify({
+        schemaVersion: 'invoice-extraction-v2',
+        pageCount: 1,
+        documentKind: 'pdf',
+        header: {
+          supplier: 'VINOS ISABEL MARIA CRUSAT SA',
+          supplierTaxId: 'A58000985',
+          supplierAddress: 'Carrer Miquel Servet 10-12, 08850 Gava (Barcelona)',
+          customerName: 'BESCUIT BAR',
+          customerTaxId: 'X7994517Q',
+          customerAddress: 'ROGER DE FLOR 77-79, 08013 Barcelona',
+          invoiceNo: 'FP26020968',
+          date: '2026-04-21',
+          subtotalAmount: '88.16',
+          taxAmount: '18.51',
+          totalAmount: '106.67',
+          currency: 'EUR',
+          notes: 'Forma de pago: CONT Contado/Metalico/Factura',
+        },
+        lineItems: [
+          {
+            id: '1',
+            name: 'SERV. ENTREGA/RECOGIDA',
+            qty: '1.00',
+            unit: 'un',
+            unitPrice: '3.49',
+            lineTotal: '3.49',
+            taxRate: '21%',
+            ingredient: '',
+            matched: false,
+          },
+          {
+            id: '802',
+            name: 'ESTRELLA GALICIA 24x33 cl. RET',
+            qty: '4.00',
+            unit: 'un',
+            unitPrice: '31.75',
+            lineTotal: '84.67',
+            taxRate: '21%',
+            notes: 'Descuento: 42,33',
+            ingredient: '',
+            matched: false,
+          },
+        ],
+        confidence: {
+          overall: 0.95,
+          header: 0.98,
+          lineItems: 0.95,
+          totals: 0.95,
+        },
+        warnings: [],
+        provider: 'gemini',
+        model: 'gemini-3.1-flash-lite',
+      }),
+      fileName: 'Factura venta FP26020968.pdf',
+      provider: 'gemini',
+      model: 'gemini-3.1-flash-lite',
+      documentKind: 'pdf',
+    })
+
+    expect(draft.header).toMatchObject({
+      supplier: 'VINOS ISABEL MARIA CRUSAT SA',
+      supplierTaxId: 'A58000985',
+      supplierAddress: 'Carrer Miquel Servet 10-12, 08850 Gava (Barcelona)',
+      customerName: 'BESCUIT BAR',
+      customerTaxId: 'X7994517Q',
+      customerAddress: 'ROGER DE FLOR 77-79, 08013 Barcelona',
+      invoiceNo: 'FP26020968',
+      date: '2026-04-21',
+      totalAmount: '106.67',
+      taxAmount: '18.51',
+    })
+    expect(draft.lineItems).toEqual([
+      expect.objectContaining({
+        id: '1',
+        name: 'SERV. ENTREGA/RECOGIDA',
+        qty: '1.00',
+        unitPrice: '4.22',
+        lineTotal: '4.22',
+        taxRate: '21%',
+        ingredient: '',
+        matched: false,
+      }),
+      expect.objectContaining({
+        id: '802',
+        name: 'ESTRELLA GALICIA 24x33 cl. RET',
+        qty: '4.00',
+        unitPrice: '25.61',
+        lineTotal: '102.45',
+        taxRate: '21%',
+        notes: 'Descuento: 42,33',
+        ingredient: '',
+        matched: false,
+      }),
+    ])
+    expect(draft.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/行项目.*总额.*不一致/)]),
+    )
+  })
+
+  test('keeps provider line totals that already include tax', () => {
+    const draft = parseProviderExtractionResponse({
+      rawJson: JSON.stringify({
+        schemaVersion: 'invoice-extraction-v2',
+        pageCount: 1,
+        documentKind: 'pdf',
+        header: {
+          supplier: 'Proveedor IVA Incluido SL',
+          invoiceNo: 'F-IVA-1',
+          date: '2026-05-18',
+          subtotalAmount: '100.00',
+          taxAmount: '21.00',
+          totalAmount: '121.00',
+          currency: 'EUR',
+          notes: '',
+        },
+        lineItems: [
+          {
+            id: 'line-1',
+            name: 'Producto con IVA',
+            qty: '1',
+            unit: 'un',
+            unitPrice: '100.00',
+            lineTotal: '121.00',
+            taxRate: '21%',
+            notes: '   ',
+            ingredient: '',
+            matched: false,
+          },
+        ],
+        confidence: {
+          overall: 0.95,
+          header: 0.95,
+          lineItems: 0.95,
+          totals: 0.95,
+        },
+        warnings: [],
+        provider: 'gemini',
+        model: 'gemini-3.1-flash-lite',
+      }),
+      fileName: 'iva-incluido.pdf',
+      provider: 'gemini',
+      model: 'gemini-3.1-flash-lite',
+      documentKind: 'pdf',
+    })
+
+    expect(draft.lineItems[0]).toMatchObject({
+      unitPrice: '121.00',
+      lineTotal: '121.00',
+    })
+    expect(draft.lineItems[0]?.notes).toBeUndefined()
+    expect(draft.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/行项目.*总额.*不一致/)]),
+    )
+  })
+
+  test('defaults to provider tax-included line totals when total is blank', () => {
+    const draft = parseProviderExtractionResponse({
+      rawJson: JSON.stringify({
+        schemaVersion: 'invoice-extraction-v2',
+        pageCount: 1,
+        documentKind: 'pdf',
+        header: {
+          supplier: 'Proveedor Sin Total SL',
+          invoiceNo: 'F-NO-TOTAL-1',
+          date: '2026-05-18',
+          subtotalAmount: '100.00',
+          taxAmount: '21.00',
+          totalAmount: '',
+          currency: 'EUR',
+          notes: '',
+        },
+        lineItems: [
+          {
+            id: 'line-1',
+            name: 'Producto ya con IVA',
+            qty: '1',
+            unit: 'un',
+            unitPrice: '121.00',
+            lineTotal: '121.00',
+            taxRate: '21%',
+            ingredient: '',
+            matched: false,
+          },
+        ],
+        confidence: {
+          overall: 0.95,
+          header: 0.95,
+          lineItems: 0.95,
+          totals: 0.5,
+        },
+        warnings: [],
+        provider: 'gemini',
+        model: 'gemini-3.1-flash-lite',
+      }),
+      fileName: 'sin-total.pdf',
+      provider: 'gemini',
+      model: 'gemini-3.1-flash-lite',
+      documentKind: 'pdf',
+    })
+
+    expect(draft.lineItems[0]).toMatchObject({
+      unitPrice: '121.00',
+      lineTotal: '121.00',
+      taxRate: '21%',
+    })
+  })
+
+  test('interprets fraction-style tax rates as percentages for grossing net totals', () => {
+    const draft = parseProviderExtractionResponse({
+      rawJson: JSON.stringify({
+        schemaVersion: 'invoice-extraction-v2',
+        pageCount: 1,
+        documentKind: 'pdf',
+        header: {
+          supplier: 'Proveedor Fraccion SL',
+          invoiceNo: 'F-FRAC-1',
+          date: '2026-05-18',
+          subtotalAmount: '110.00',
+          taxAmount: '23.10',
+          totalAmount: '133.10',
+          currency: 'EUR',
+          notes: '',
+        },
+        lineItems: [
+          {
+            id: 'line-1',
+            name: 'Producto fraccion',
+            qty: '1',
+            unit: 'un',
+            unitPrice: '100.00',
+            lineTotal: '100.00',
+            taxRate: '0.21',
+            ingredient: '',
+            matched: false,
+          },
+          {
+            id: 'line-2',
+            name: 'Producto sin cantidad',
+            qty: '0',
+            unit: 'un',
+            unitPrice: '10.00',
+            lineTotal: '10.00',
+            taxRate: '0.21',
+            ingredient: '',
+            matched: false,
+          },
+        ],
+        confidence: {
+          overall: 0.95,
+          header: 0.95,
+          lineItems: 0.95,
+          totals: 0.95,
+        },
+        warnings: [],
+        provider: 'gemini',
+        model: 'gemini-3.1-flash-lite',
+      }),
+      fileName: 'iva-fraccion.pdf',
+      provider: 'gemini',
+      model: 'gemini-3.1-flash-lite',
+      documentKind: 'pdf',
+    })
+
+    expect(draft.lineItems).toEqual([
+      expect.objectContaining({
+        unitPrice: '121.00',
+        lineTotal: '121.00',
+      }),
+      expect.objectContaining({
+        unitPrice: '12.10',
+        lineTotal: '12.10',
+      }),
+    ])
+    expect(draft.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/行项目.*总额.*不一致/)]),
+    )
+  })
+
+  test('uses normalized decimal-comma quantities when deriving unit price', () => {
+    const draft = parseProviderExtractionResponse({
+      rawJson: JSON.stringify({
+        schemaVersion: 'invoice-extraction-v2',
+        pageCount: 1,
+        documentKind: 'pdf',
+        header: {
+          supplier: 'Proveedor Decimal SL',
+          invoiceNo: 'F-DEC-1',
+          date: '2026-05-18',
+          subtotalAmount: '15.00',
+          taxAmount: '3.15',
+          totalAmount: '18.15',
+          currency: 'EUR',
+          notes: '',
+        },
+        lineItems: [
+          {
+            id: 'line-1',
+            name: 'Producto decimal',
+            qty: '1,5',
+            unit: 'kg',
+            unitPrice: '10.00',
+            lineTotal: '15.00',
+            taxRate: '21%',
+            ingredient: '',
+            matched: false,
+          },
+        ],
+        confidence: {
+          overall: 0.95,
+          header: 0.95,
+          lineItems: 0.95,
+          totals: 0.95,
+        },
+        warnings: [],
+        provider: 'gemini',
+        model: 'gemini-3.1-flash-lite',
+      }),
+      fileName: 'decimal-comma.pdf',
+      provider: 'gemini',
+      model: 'gemini-3.1-flash-lite',
+      documentKind: 'pdf',
+    })
+
+    expect(draft.lineItems[0]).toMatchObject({
+      qty: '1.5',
+      unitPrice: '12.10',
+      lineTotal: '18.15',
     })
   })
 
