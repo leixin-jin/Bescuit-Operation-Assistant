@@ -155,6 +155,10 @@ function buildInvoiceExtractionPrompt(fileName: string, documentKind: string) {
     '- Preserve invoice line items as product rows, not accounting summaries.',
     '- Use YYYY-MM-DD dates when visible; leave uncertain fields empty.',
     '- Use dot decimal money strings, for example 12.50.',
+    '- For each line item, unitPrice and lineTotal must be tax-included prices for display.',
+    '- If the PDF shows net prices plus IVA, calculate tax-included lineTotal = net line total * (1 + IVA rate).',
+    '- If discounts, portes, returns, or other adjustments are printed on a product row, put the text in lineItems[].notes.',
+    '- Put the visible IVA rate in lineItems[].taxRate, for example 21%.',
     '- Put missing, low-confidence, or inconsistent totals in warnings.',
     '- Do not infer ingredient mappings; ingredient must be an empty string and matched must be false.',
   ].join('\n')

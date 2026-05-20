@@ -56,7 +56,7 @@ describe('invoice mock store', () => {
     )
   })
 
-  test('jobs become ready only after header fields and mappings are complete', async () => {
+  test('jobs become ready after required header fields are complete', async () => {
     const createdJob = await createInvoiceJob('metro-upload.pdf')
 
     await saveInvoiceJob({

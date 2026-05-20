@@ -189,7 +189,7 @@ function InvoiceReviewWorkbenchPage() {
   const handleLineItemFieldChange = (
     itemId: string,
     value: string,
-    field: 'qty' | 'unitPrice' | 'ingredient',
+    field: 'qty' | 'unitPrice',
   ) => {
     const itemIndex = form.state.values.lineItems.findIndex((item) => item.id === itemId)
     if (itemIndex === -1) {
@@ -197,9 +197,7 @@ function InvoiceReviewWorkbenchPage() {
     }
 
     form.setFieldValue(`lineItems[${itemIndex}].${field}`, value)
-    if (field === 'ingredient') {
-      form.setFieldValue(`lineItems[${itemIndex}].matched`, Boolean(value.trim()))
-    }
+    form.setFieldValue(`lineItems[${itemIndex}].lineTotal`, undefined)
   }
 
   if (isRehydratingJob) {
@@ -249,8 +247,7 @@ function InvoiceReviewWorkbenchPage() {
             const readinessSummary = getInvoiceReadinessSummary(editableJob)
             const blockingIssueCount =
               readinessSummary.missingHeaderFields.length +
-              readinessSummary.invalidHeaderFields.length +
-              (readinessSummary.unmatchedLineItems > 0 ? 1 : 0)
+              readinessSummary.invalidHeaderFields.length
 
             return (
               <>
@@ -371,7 +368,6 @@ function InvoiceReviewWorkbenchPage() {
                       />
                       <ReviewTable
                         lineItems={editableJob.lineItems}
-                        ingredientOptions={pageData.ingredientOptions}
                         disabled={isPipelineJobProcessing}
                         onQuantityChange={(itemId, value) => {
                           if (isDecimalInput(value)) {
@@ -383,9 +379,6 @@ function InvoiceReviewWorkbenchPage() {
                             handleLineItemFieldChange(itemId, value, 'unitPrice')
                           }
                         }}
-                        onIngredientChange={(itemId, value) =>
-                          handleLineItemFieldChange(itemId, value, 'ingredient')
-                        }
                       />
                     </div>
 
@@ -433,12 +426,6 @@ function InvoiceReviewWorkbenchPage() {
                             <p className="mt-2">
                               金额格式不正确：
                               {readinessSummary.invalidHeaderFields.join('、')}
-                            </p>
-                          ) : null}
-                          {readinessSummary.unmatchedLineItems > 0 ? (
-                            <p className="mt-2">
-                              还有 {readinessSummary.unmatchedLineItems}{' '}
-                              项商品未映射到原料库。
                             </p>
                           ) : null}
                         </div>
@@ -515,7 +502,8 @@ function mergeReviewFormValues(
     header: { ...values.header },
     lineItems: values.lineItems.map((item) => ({
       ...item,
-      matched: Boolean(item.ingredient.trim()),
+      ingredient: '',
+      matched: false,
     })),
   }
 }

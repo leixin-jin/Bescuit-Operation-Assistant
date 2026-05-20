@@ -1,8 +1,28 @@
 // @vitest-environment jsdom
 
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
-import { describe, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+
+declare module 'vitest' {
+  interface Assertion<T = any> {
+    toBeInTheDocument(): T
+  }
+}
+
+expect.extend({
+  toBeInTheDocument(received: Element | null) {
+    const pass = received !== null && document.body.contains(received)
+
+    return {
+      pass,
+      message: () =>
+        pass
+          ? 'expected element not to be in the document'
+          : 'expected element to be in the document',
+    }
+  },
+})
 
 vi.mock('@/styles/globals.css?url', () => ({
   default: '/test.css',
@@ -12,14 +32,15 @@ vi.mock('@/lib/server/queries/invoices', async () => {
   const actual = await vi.importActual<typeof import('@/lib/server/queries/invoices')>(
     '@/lib/server/queries/invoices',
   )
-  let reviewCalls = 0
+  const reviewCallsByJobId = new Map<string, number>()
 
   return {
     ...actual,
-    getInvoiceReviewPageData: vi.fn(async () => {
-      reviewCalls += 1
+    getInvoiceReviewPageData: vi.fn(async (jobId: string) => {
+      const reviewCalls = (reviewCallsByJobId.get(jobId) ?? 0) + 1
+      reviewCallsByJobId.set(jobId, reviewCalls)
 
-      if (reviewCalls === 1) {
+      if (jobId === 'rehydrated-review-job' && reviewCalls === 1) {
         return {
           job: null,
           ingredientOptions: actual.ingredientOptions,
@@ -28,7 +49,7 @@ vi.mock('@/lib/server/queries/invoices', async () => {
 
       return {
         job: {
-          jobId: 'rehydrated-review-job',
+          jobId,
           fileName: 'rehydrated-review.pdf',
           uploadedAt: '2026-04-24T11:00:00.000Z',
           pageCount: 1,
@@ -47,7 +68,10 @@ vi.mock('@/lib/server/queries/invoices', async () => {
               name: '柠檬',
               qty: '3',
               unit: 'kg',
-              unitPrice: '2.10',
+              unitPrice: '25.61',
+              lineTotal: '102.45',
+              taxRate: '21%',
+              notes: 'Descuento: 42,33',
               ingredient: '',
               matched: false,
             },
@@ -57,6 +81,10 @@ vi.mock('@/lib/server/queries/invoices', async () => {
       }
     }),
   }
+})
+
+afterEach(() => {
+  cleanup()
 })
 
 async function renderRoute(initialPath: string) {
@@ -89,5 +117,36 @@ describe('invoice review route hydration', () => {
     })
 
     expect(screen.getAllByText(/rehydrated-review\.pdf/).length).toBeGreaterThan(0)
+  })
+
+  test('shows tax-inclusive pricing details without ingredient mapping UI', async () => {
+    await renderRoute('/invoices/review/review-tax-inclusive-job')
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '发票 review 工作台' })).toBeTruthy()
+    })
+
+    expect(screen.getByText('IVA')).toBeInTheDocument()
+    expect(screen.getByText('21%')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('25.61')).toBeInTheDocument()
+    expect(screen.getByText('€102.45')).toBeInTheDocument()
+    expect(screen.getByText('Descuento: 42,33')).toBeInTheDocument()
+    expect(screen.queryByText('原料映射')).not.toBeInTheDocument()
+    expect(screen.queryByText(/未映射到原料库/)).not.toBeInTheDocument()
+  })
+
+  test('recalculates line total display after quantity or unit price edits', async () => {
+    await renderRoute('/invoices/review/review-tax-inclusive-job')
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '发票 review 工作台' })).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByDisplayValue('25.61'), {
+      target: { value: '30.00' },
+    })
+
+    expect(screen.queryByText('€102.45')).not.toBeInTheDocument()
+    expect(screen.getByText('€90.00')).toBeInTheDocument()
   })
 })

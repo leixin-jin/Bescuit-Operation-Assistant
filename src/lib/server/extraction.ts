@@ -478,6 +478,26 @@ function normalizeHeaderDraft(
   return {
     supplier:
       typeof value?.supplier === 'string' ? value.supplier : fallback.supplier,
+    supplierTaxId:
+      typeof value?.supplierTaxId === 'string'
+        ? value.supplierTaxId
+        : fallback.supplierTaxId,
+    supplierAddress:
+      typeof value?.supplierAddress === 'string'
+        ? value.supplierAddress
+        : fallback.supplierAddress,
+    customerName:
+      typeof value?.customerName === 'string'
+        ? value.customerName
+        : fallback.customerName,
+    customerTaxId:
+      typeof value?.customerTaxId === 'string'
+        ? value.customerTaxId
+        : fallback.customerTaxId,
+    customerAddress:
+      typeof value?.customerAddress === 'string'
+        ? value.customerAddress
+        : fallback.customerAddress,
     invoiceNo:
       typeof value?.invoiceNo === 'string' ? value.invoiceNo : fallback.invoiceNo,
     date: typeof value?.date === 'string' ? value.date : fallback.date,
@@ -511,6 +531,10 @@ function normalizeLineItemDraft(
     unitPrice: typeof value.unitPrice === 'string' ? value.unitPrice : '',
     lineTotal: typeof value.lineTotal === 'string' ? value.lineTotal : undefined,
     taxRate: typeof value.taxRate === 'string' ? value.taxRate : undefined,
+    notes:
+      typeof value.notes === 'string' && value.notes.trim().length > 0
+        ? value.notes
+        : undefined,
     ingredient: typeof value.ingredient === 'string' ? value.ingredient : '',
     matched:
       (typeof value.ingredient === 'string' && value.ingredient.trim().length > 0) ||
