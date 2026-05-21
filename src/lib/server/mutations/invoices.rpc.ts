@@ -373,61 +373,115 @@ async function writeConfirmedInvoiceAccounting(
   const taxAmount = parseCurrencyAmount(job.header.taxAmount)
   const subtotalAmount = roundCurrency(totalAmount - taxAmount)
   const now = new Date().toISOString()
-  const invoiceUpsertResult = await db
-    .prepare(
-      `/* invoice:upsert-invoice */
-      INSERT INTO invoices (
-        id,
-        intake_job_id,
-        invoice_date,
-        supplier_name,
-        document_number,
-        subtotal_amount,
-        tax_amount,
-        total_amount,
-        source_document_id,
-        dedupe_key,
-        review_status,
-        updated_at
-      )
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?
-      WHERE EXISTS (
-        SELECT 1
-        FROM intake_jobs
-        WHERE intake_jobs.id = ?
-          AND intake_jobs.stage = 'ready'
-      )
-      ON CONFLICT(dedupe_key) DO UPDATE SET
-        intake_job_id = excluded.intake_job_id,
-        invoice_date = excluded.invoice_date,
-        supplier_name = excluded.supplier_name,
-        document_number = excluded.document_number,
-        subtotal_amount = excluded.subtotal_amount,
-        tax_amount = excluded.tax_amount,
-        total_amount = excluded.total_amount,
-        source_document_id = excluded.source_document_id,
-        review_status = excluded.review_status,
-        updated_at = excluded.updated_at`,
-    )
-    .bind(
-      invoiceId,
-      job.jobId,
-      job.header.date,
-      job.header.supplier.trim(),
-      job.header.invoiceNo.trim(),
-      subtotalAmount,
-      taxAmount,
-      totalAmount,
-      sourceDocumentId,
-      invoiceDedupeKey,
-      now,
-      job.jobId,
-    )
-    .run()
+  const existingInvoiceId = await getSameJobInvoiceId(db, job.jobId, invoiceId)
+  let persistedInvoiceId = existingInvoiceId
 
-  assertInvoiceMutationChanged(invoiceUpsertResult, '发票任务正在删除，不能保存或确认。')
+  if (persistedInvoiceId) {
+    const invoiceUpdateResult = await db
+      .prepare(
+        `/* invoice:update-existing-invoice */
+        UPDATE invoices
+        SET
+          intake_job_id = ?,
+          invoice_date = ?,
+          supplier_name = ?,
+          document_number = ?,
+          subtotal_amount = ?,
+          tax_amount = ?,
+          total_amount = ?,
+          source_document_id = ?,
+          dedupe_key = ?,
+          review_status = 'ready',
+          updated_at = ?
+        WHERE id = ?
+          AND EXISTS (
+            SELECT 1
+            FROM intake_jobs
+            WHERE intake_jobs.id = ?
+              AND intake_jobs.stage = 'ready'
+          )`,
+      )
+      .bind(
+        job.jobId,
+        job.header.date,
+        job.header.supplier.trim(),
+        job.header.invoiceNo.trim(),
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+        sourceDocumentId,
+        invoiceDedupeKey,
+        now,
+        persistedInvoiceId,
+        job.jobId,
+      )
+      .run()
 
-  const persistedInvoiceId = await getPersistedInvoiceId(db, invoiceDedupeKey)
+    assertInvoiceMutationChanged(
+      invoiceUpdateResult,
+      '发票任务正在删除，不能保存或确认。',
+    )
+  } else {
+    const invoiceUpsertResult = await db
+      .prepare(
+        `/* invoice:upsert-invoice */
+        INSERT INTO invoices (
+          id,
+          intake_job_id,
+          invoice_date,
+          supplier_name,
+          document_number,
+          subtotal_amount,
+          tax_amount,
+          total_amount,
+          source_document_id,
+          dedupe_key,
+          review_status,
+          updated_at
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?
+        WHERE EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'ready'
+        )
+        ON CONFLICT(dedupe_key) DO UPDATE SET
+          intake_job_id = excluded.intake_job_id,
+          invoice_date = excluded.invoice_date,
+          supplier_name = excluded.supplier_name,
+          document_number = excluded.document_number,
+          subtotal_amount = excluded.subtotal_amount,
+          tax_amount = excluded.tax_amount,
+          total_amount = excluded.total_amount,
+          source_document_id = excluded.source_document_id,
+          review_status = excluded.review_status,
+          updated_at = excluded.updated_at`,
+      )
+      .bind(
+        invoiceId,
+        job.jobId,
+        job.header.date,
+        job.header.supplier.trim(),
+        job.header.invoiceNo.trim(),
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+        sourceDocumentId,
+        invoiceDedupeKey,
+        now,
+        job.jobId,
+      )
+      .run()
+
+    assertInvoiceMutationChanged(
+      invoiceUpsertResult,
+      '发票任务正在删除，不能保存或确认。',
+    )
+
+    persistedInvoiceId = await getPersistedInvoiceId(db, invoiceDedupeKey)
+  }
+
   const ledgerEntryId = getLedgerEntryId(persistedInvoiceId)
 
   const statements: D1PreparedStatement[] = [
@@ -578,6 +632,26 @@ async function getPersistedInvoiceId(db: D1Database, dedupeKey: string) {
   }
 
   return invoiceId
+}
+
+async function getSameJobInvoiceId(db: D1Database, jobId: string, invoiceId: string) {
+  const rows = await allD1<InvoiceIdRow>(
+    db,
+    `/* invoice:resolve-existing-invoice */
+    SELECT id
+    FROM invoices
+    WHERE intake_job_id = ? OR id = ?
+    ORDER BY
+      CASE
+        WHEN intake_job_id = ? THEN 0
+        WHEN id = ? THEN 1
+        ELSE 2
+      END
+    LIMIT 1`,
+    [jobId, invoiceId, jobId, invoiceId],
+  )
+
+  return rows[0]?.id ?? null
 }
 
 async function assertInvoiceReviewDraftWritable(db: D1Database, jobId: string) {

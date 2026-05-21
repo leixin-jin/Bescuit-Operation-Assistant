@@ -859,6 +859,91 @@ describe('invoice review D1 integration', () => {
     })
   })
 
+  test('confirming the same job after invoice identity correction updates the existing invoice', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-1',
+          original_filename: 'invoice.pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-1',
+          source_document_id: 'src-1',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        createExtractionResultRow({
+          id: 'ext-job-1',
+          intake_job_id: 'job-1',
+        }),
+      ],
+    })
+    const originalJob = createReadyReviewJob()
+    const correctedJob = createReadyReviewJob({
+      header: {
+        supplier: 'Makro Alcala',
+        invoiceNo: 'MK-002',
+        date: '2026-04-21',
+        totalAmount: '242.00',
+        taxAmount: '42.00',
+      },
+      lineItems: [
+        {
+          id: 'line-2',
+          name: 'Fanta 330ml',
+          qty: '20',
+          unit: 'can',
+          unitPrice: '10.00',
+          lineTotal: '200.00',
+          taxRate: '21%',
+          notes: '',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+    })
+
+    await expect(confirmInvoiceReviewJobInDatabase(env, originalJob)).resolves.toMatchObject({
+      ok: true,
+    })
+    const invoiceId = tables.invoices[0]?.id
+
+    await expect(
+      confirmInvoiceReviewJobInDatabase(env, correctedJob),
+    ).resolves.toMatchObject({
+      ok: true,
+    })
+
+    expect(tables.invoices).toHaveLength(1)
+    expect(tables.invoices[0]).toMatchObject({
+      id: invoiceId,
+      intake_job_id: 'job-1',
+      supplier_name: 'Makro Alcala',
+      document_number: 'MK-002',
+      invoice_date: '2026-04-21',
+      total_amount: 242,
+      tax_amount: 42,
+      dedupe_key: 'makro alcala|MK-002|2026-04-21',
+    })
+    expect(tables.invoice_items).toHaveLength(1)
+    expect(tables.invoice_items[0]).toMatchObject({
+      invoice_id: invoiceId,
+      raw_product_name: 'Fanta 330ml',
+      raw_quantity: 20,
+    })
+    expect(tables.ledger_entries).toHaveLength(1)
+    expect(tables.ledger_entries[0]).toMatchObject({
+      id: `ledger_${invoiceId}`,
+      entry_date: '2026-04-21',
+      amount: 242,
+      vendor: 'Makro Alcala',
+      source_id: invoiceId,
+    })
+  })
+
   test('confirming the same supplier invoice from two jobs reuses invoice and ledger rows', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [
@@ -898,6 +983,20 @@ describe('invoice review D1 integration', () => {
     const secondJob = createReadyReviewJob({
       jobId: 'job-b',
       fileName: 'invoice-b.pdf',
+      lineItems: [
+        {
+          id: 'line-b',
+          name: 'Sprite 330ml',
+          qty: '5',
+          unit: 'can',
+          unitPrice: '20.00',
+          lineTotal: '100.00',
+          taxRate: '21%',
+          notes: '',
+          ingredient: '',
+          matched: false,
+        },
+      ],
     })
 
     await expect(confirmInvoiceReviewJobInDatabase(env, firstJob)).resolves.toMatchObject({
@@ -909,6 +1008,11 @@ describe('invoice review D1 integration', () => {
 
     expect(tables.invoices).toHaveLength(1)
     expect(tables.invoice_items).toHaveLength(1)
+    expect(tables.invoice_items[0]).toMatchObject({
+      invoice_id: tables.invoices[0]?.id,
+      raw_product_name: 'Sprite 330ml',
+      raw_quantity: 5,
+    })
     expect(tables.ledger_entries).toHaveLength(1)
     expect(tables.invoices[0]).toMatchObject({
       supplier_name: 'Makro Madrid',
@@ -2034,6 +2138,20 @@ class FakeD1PreparedStatement {
       return invoice ? [{ id: invoice.id }] : []
     }
 
+    if (sql.includes('invoice:resolve-existing-invoice')) {
+      const [jobId, invoiceId] = this.params
+      return this.tables.invoices
+        .filter((row) => row.intake_job_id === jobId || row.id === invoiceId)
+        .sort((left, right) => {
+          const leftRank = left.intake_job_id === jobId ? 0 : 1
+          const rightRank = right.intake_job_id === jobId ? 0 : 1
+
+          return leftRank - rightRank
+        })
+        .slice(0, 1)
+        .map((row) => ({ id: row.id }))
+    }
+
     if (sql.includes('invoice-upload:find-duplicate')) {
       const [contentHash] = this.params
       return this.tables.intake_jobs
@@ -2667,6 +2785,62 @@ class FakeD1PreparedStatement {
       return beforeCount - this.tables.source_documents.length
     }
 
+    if (sql.includes('invoice:update-existing-invoice')) {
+      const [
+        intakeJobId,
+        invoiceDate,
+        supplierName,
+        documentNumber,
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+        sourceDocumentId,
+        dedupeKey,
+        now,
+        id,
+        guardJobId,
+      ] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === guardJobId && candidate.stage === 'ready',
+      )
+      const existingRow = this.tables.invoices.find((row) => row.id === id)
+
+      if (!job || !existingRow) {
+        return 0
+      }
+
+      if (
+        this.tables.invoices.some(
+          (row) => row.id !== existingRow.id && row.dedupe_key === dedupeKey,
+        )
+      ) {
+        throw new Error('UNIQUE constraint failed: invoices.dedupe_key')
+      }
+
+      if (
+        this.tables.invoices.some(
+          (row) => row.id !== existingRow.id && row.intake_job_id === intakeJobId,
+        )
+      ) {
+        throw new Error('UNIQUE constraint failed: invoices.intake_job_id')
+      }
+
+      Object.assign(existingRow, {
+        intake_job_id: String(intakeJobId),
+        dedupe_key: String(dedupeKey),
+        invoice_date: String(invoiceDate),
+        supplier_name: String(supplierName),
+        document_number: String(documentNumber),
+        subtotal_amount: toNullableNumber(subtotalAmount),
+        tax_amount: Number(taxAmount),
+        total_amount: Number(totalAmount),
+        source_document_id: String(sourceDocumentId),
+        review_status: 'ready',
+        updated_at: String(now),
+      })
+      return 1
+    }
+
     if (sql.includes('invoice:upsert-invoice')) {
       const [
         id,
@@ -2690,9 +2864,9 @@ class FakeD1PreparedStatement {
         return 0
       }
 
-      const existingRow =
-        this.tables.invoices.find((row) => row.dedupe_key === dedupeKey) ??
-        this.tables.invoices.find((row) => row.id === id)
+      const existingRow = this.tables.invoices.find(
+        (row) => row.dedupe_key === dedupeKey,
+      )
       const nextRow: InvoiceRow = {
         id: String(id),
         intake_job_id: String(intakeJobId),
@@ -2712,11 +2886,27 @@ class FakeD1PreparedStatement {
       }
 
       if (existingRow) {
+        const conflictingIntakeJob = this.tables.invoices.find(
+          (row) => row.id !== existingRow.id && row.intake_job_id === intakeJobId,
+        )
+
+        if (conflictingIntakeJob) {
+          throw new Error('UNIQUE constraint failed: invoices.intake_job_id')
+        }
+
         Object.assign(existingRow, nextRow, {
           id: existingRow.id,
           created_at: existingRow.created_at,
         })
       } else {
+        if (this.tables.invoices.some((row) => row.id === id)) {
+          throw new Error('UNIQUE constraint failed: invoices.id')
+        }
+
+        if (this.tables.invoices.some((row) => row.intake_job_id === intakeJobId)) {
+          throw new Error('UNIQUE constraint failed: invoices.intake_job_id')
+        }
+
         this.tables.invoices.push(nextRow)
       }
       return 1
