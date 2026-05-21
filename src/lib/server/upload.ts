@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 
 import { getDb } from '@/lib/db/client'
 import { intakeJobs, sourceDocuments } from '@/lib/db/schema'
@@ -18,6 +18,14 @@ interface ExistingInvoiceUploadRow {
   jobId: string
   sourceDocumentId: string
   r2Key: string | null
+}
+
+interface ExistingInvoiceSourceDocumentRow {
+  sourceDocumentId: string
+  r2Key: string | null
+  fileName: string
+  mimeType: string | null
+  uploadedAt: string
 }
 
 export async function uploadInvoiceSourceDocument(input: {
@@ -113,6 +121,18 @@ export async function uploadInvoiceSourceDocument(input: {
       error,
     })
 
+    const recoveredDuplicate = await recoverDuplicateUploadConflict({
+      env: input.env,
+      db,
+      d1,
+      contentHash,
+      error,
+    })
+
+    if (recoveredDuplicate) {
+      return recoveredDuplicate
+    }
+
     throw error
   }
 
@@ -146,7 +166,8 @@ async function findExistingInvoiceUpload(
       INNER JOIN intake_jobs
         ON intake_jobs.source_document_id = source_documents.id
       WHERE source_documents.content_hash = ?
-        AND intake_jobs.stage != 'deleting'
+        AND source_documents.source_type = 'invoice-upload'
+        AND intake_jobs.stage IN ('queued', 'extracting', 'needs_review', 'ready')
       ORDER BY intake_jobs.created_at DESC
       LIMIT 1
     `,
@@ -154,6 +175,171 @@ async function findExistingInvoiceUpload(
   )
 
   return rows[0] ?? null
+}
+
+async function recoverDuplicateUploadConflict(input: {
+  env: AppBindings
+  db: NonNullable<ReturnType<typeof getDb>>
+  d1: D1Database
+  contentHash: string
+  error: unknown
+}) {
+  if (!isContentHashUniqueConstraintError(input.error)) {
+    return null
+  }
+
+  const existingUpload = await findExistingInvoiceUpload(input.d1, input.contentHash)
+
+  if (existingUpload?.r2Key) {
+    return {
+      jobId: existingUpload.jobId,
+      sourceDocumentId: existingUpload.sourceDocumentId,
+      r2Key: existingUpload.r2Key,
+    } satisfies InvoiceUploadResult
+  }
+
+  const existingSourceDocument = await findExistingInvoiceSourceDocument(
+    input.d1,
+    input.contentHash,
+  )
+
+  if (!existingSourceDocument?.r2Key) {
+    return null
+  }
+
+  return createQueuedInvoiceJobForExistingSource({
+    env: input.env,
+    db: input.db,
+    sourceDocument: {
+      ...existingSourceDocument,
+      r2Key: existingSourceDocument.r2Key,
+    },
+  })
+}
+
+async function findExistingInvoiceSourceDocument(
+  db: D1Database,
+  contentHash: string,
+) {
+  const rows = await allD1<ExistingInvoiceSourceDocumentRow>(
+    db,
+    `
+      /* invoice-upload:find-source-by-hash */
+      SELECT source_documents.id AS sourceDocumentId,
+        source_documents.r2_key AS r2Key,
+        source_documents.original_filename AS fileName,
+        source_documents.mime_type AS mimeType,
+        source_documents.uploaded_at AS uploadedAt
+      FROM source_documents
+      WHERE source_documents.content_hash = ?
+        AND source_documents.source_type = 'invoice-upload'
+        AND source_documents.r2_key IS NOT NULL
+      ORDER BY source_documents.uploaded_at DESC
+      LIMIT 1
+    `,
+    [contentHash],
+  )
+
+  return rows[0] ?? null
+}
+
+async function createQueuedInvoiceJobForExistingSource(input: {
+  env: AppBindings
+  db: NonNullable<ReturnType<typeof getDb>>
+  sourceDocument: ExistingInvoiceSourceDocumentRow & { r2Key: string }
+}) {
+  const jobId = `job_${crypto.randomUUID()}`
+  const queuedAt = new Date().toISOString()
+  const provider = selectInvoiceExtractionProvider(input.env)
+  const mimeType = input.sourceDocument.mimeType || 'application/octet-stream'
+
+  await input.db.insert(intakeJobs).values({
+    id: jobId,
+    sourceDocumentId: input.sourceDocument.sourceDocumentId,
+    extractorProvider: provider.id,
+    extractorModel: provider.model,
+    stage: 'queued',
+    createdAt: queuedAt,
+    updatedAt: queuedAt,
+  })
+
+  await input.db
+    .update(sourceDocuments)
+    .set({
+      status: 'uploaded',
+    })
+    .where(eq(sourceDocuments.id, input.sourceDocument.sourceDocumentId))
+
+  try {
+    await enqueueInvoiceIntakeJob(input.env, {
+      jobId,
+      sourceDocumentId: input.sourceDocument.sourceDocumentId,
+      r2Key: input.sourceDocument.r2Key,
+      fileName: input.sourceDocument.fileName,
+      mimeType,
+      uploadedAt: input.sourceDocument.uploadedAt,
+    })
+  } catch (error) {
+    await markQueuedDuplicateRecoveryFailed({
+      db: input.db,
+      sourceDocumentId: input.sourceDocument.sourceDocumentId,
+      jobId,
+      error,
+    })
+
+    throw error
+  }
+
+  return {
+    jobId,
+    sourceDocumentId: input.sourceDocument.sourceDocumentId,
+    r2Key: input.sourceDocument.r2Key,
+  } satisfies InvoiceUploadResult
+}
+
+async function markQueuedDuplicateRecoveryFailed(input: {
+  db: NonNullable<ReturnType<typeof getDb>>
+  sourceDocumentId: string
+  jobId: string
+  error: unknown
+}) {
+  const now = new Date().toISOString()
+  const errorMessage =
+    input.error instanceof Error ? input.error.message : 'Upload pipeline failed'
+
+  await Promise.allSettled([
+    input.db
+      .update(intakeJobs)
+      .set({
+        stage: 'error',
+        errorMessage,
+        updatedAt: now,
+      })
+      .where(and(eq(intakeJobs.id, input.jobId), eq(intakeJobs.stage, 'queued'))),
+    input.db
+      .update(sourceDocuments)
+      .set({
+        status: 'error',
+      })
+      .where(eq(sourceDocuments.id, input.sourceDocumentId)),
+  ])
+}
+
+function isContentHashUniqueConstraintError(error: unknown) {
+  let current: unknown = error
+
+  while (current instanceof Error) {
+    if (
+      current.message.includes('source_documents.content_hash') &&
+      /unique|constraint/i.test(current.message)
+    ) {
+      return true
+    }
+
+    current = current.cause
+  }
+
+  return false
 }
 
 function buildRawDocumentKey(input: {

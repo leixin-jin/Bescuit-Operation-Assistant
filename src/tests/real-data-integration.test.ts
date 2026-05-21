@@ -240,6 +240,117 @@ describe('invoice upload D1 integration', () => {
     expect(await env.RAW_DOCUMENTS.get(first.r2Key)).not.toBeNull()
     expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(1)
   })
+
+  test('uploading identical file bytes recovers when the source hash insert races an active job', async () => {
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [
+          createSourceDocumentRow({
+            id: 'src-race-upload',
+            r2_key: 'raw-documents/2026/04/src-race-upload-invoice.pdf',
+            content_hash:
+              '12b3ba3abd0e3d9eb59c1e2804c29c15aa0eecb56a9db564214dcf59e2d05b92',
+          }),
+        ],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-race-upload',
+            source_document_id: 'src-race-upload',
+            stage: 'deleting',
+          }),
+        ],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (sql.includes('insert into "source_documents"')) {
+            currentTables.intake_jobs[0].stage = 'queued'
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-race-upload-invoice.pdf': {
+        body: 'race-invoice-bytes',
+        contentType: 'application/pdf',
+      },
+    })
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['race-invoice-bytes'], 'invoice-race.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result).toEqual({
+      jobId: 'job-race-upload',
+      sourceDocumentId: 'src-race-upload',
+      r2Key: 'raw-documents/2026/04/src-race-upload-invoice.pdf',
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(0)
+  })
+
+  test('uploading identical file bytes does not reuse an error job and requeues the existing source', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-error-upload',
+          r2_key: 'raw-documents/2026/04/src-error-upload-invoice.pdf',
+          content_hash:
+            'b6a8bde8e5eb8b31b8e234613e171ed35db55093907fcf29ac2201b6e4c17f06',
+          status: 'error',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-error-upload',
+          source_document_id: 'src-error-upload',
+          stage: 'error',
+          error_message: 'Queue unavailable',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-error-upload-invoice.pdf': {
+        body: 'errored-invoice-bytes',
+        contentType: 'application/pdf',
+      },
+    })
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['errored-invoice-bytes'], 'invoice-retry.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result.sourceDocumentId).toBe('src-error-upload')
+    expect(result.r2Key).toBe('raw-documents/2026/04/src-error-upload-invoice.pdf')
+    expect(result.jobId).not.toBe('job-error-upload')
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.source_documents[0].status).toBe('uploaded')
+    expect(tables.intake_jobs).toHaveLength(2)
+    expect(tables.intake_jobs[0].stage).toBe('error')
+    expect(tables.intake_jobs[1]).toMatchObject({
+      source_document_id: 'src-error-upload',
+      stage: 'queued',
+      error_message: null,
+    })
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toEqual([
+      {
+        jobId: result.jobId,
+        sourceDocumentId: 'src-error-upload',
+        r2Key: 'raw-documents/2026/04/src-error-upload-invoice.pdf',
+        fileName: 'invoice.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      },
+    ])
+  })
 })
 
 describe('invoice review D1 integration', () => {
@@ -1503,11 +1614,15 @@ class FakeD1PreparedStatement {
     if (sql.includes('invoice-upload:find-duplicate')) {
       const [contentHash] = this.params
       return this.tables.intake_jobs
-        .filter((job) => job.stage !== 'deleting')
+        .filter((job) =>
+          ['queued', 'extracting', 'needs_review', 'ready'].includes(job.stage),
+        )
         .map((job) => {
           const sourceDocument = this.tables.source_documents.find(
             (row) =>
-              row.id === job.source_document_id && row.content_hash === contentHash,
+              row.id === job.source_document_id &&
+              row.content_hash === contentHash &&
+              row.source_type === 'invoice-upload',
           )
 
           return sourceDocument
@@ -1523,6 +1638,27 @@ class FakeD1PreparedStatement {
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
         .slice(0, 1)
         .map(({ createdAt: _createdAt, ...row }) => row)
+    }
+
+    if (sql.includes('invoice-upload:find-source-by-hash')) {
+      const [contentHash] = this.params
+      return this.tables.source_documents
+        .filter(
+          (row) =>
+            row.content_hash === contentHash &&
+            row.source_type === 'invoice-upload' &&
+            row.r2_key !== null,
+        )
+        .slice()
+        .sort((left, right) => right.uploaded_at.localeCompare(left.uploaded_at))
+        .slice(0, 1)
+        .map((row) => ({
+          sourceDocumentId: row.id,
+          r2Key: row.r2_key,
+          fileName: row.original_filename,
+          mimeType: row.mime_type,
+          uploadedAt: row.uploaded_at,
+        }))
     }
 
     if (sql.includes('invoice:review-draft-stage')) {
@@ -1642,6 +1778,19 @@ class FakeD1PreparedStatement {
         maybeUploadedAt,
       ] = this.params
       const hasContentHash = this.params.length === 10
+      const contentHash = hasContentHash
+        ? maybeContentHash === null
+          ? null
+          : String(maybeContentHash)
+        : null
+
+      if (
+        contentHash !== null &&
+        this.tables.source_documents.some((row) => row.content_hash === contentHash)
+      ) {
+        throw new Error('D1_ERROR: UNIQUE constraint failed: source_documents.content_hash')
+      }
+
       this.tables.source_documents.push({
         id: String(id),
         source_type: String(sourceType),
@@ -1649,11 +1798,7 @@ class FakeD1PreparedStatement {
         r2_key: r2Key === null ? null : String(r2Key),
         original_filename: String(originalFilename),
         mime_type: mimeType === null ? null : String(mimeType),
-        content_hash: hasContentHash
-          ? maybeContentHash === null
-            ? null
-            : String(maybeContentHash)
-          : null,
+        content_hash: contentHash,
         uploaded_by: (hasContentHash ? maybeUploadedBy : maybeContentHash) === null
           ? null
           : String(hasContentHash ? maybeUploadedBy : maybeContentHash),
