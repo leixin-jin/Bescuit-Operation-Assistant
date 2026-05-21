@@ -23,6 +23,10 @@ pnpm smoke
 - `pnpm cf-typegen` 根据 `wrangler.jsonc` 生成 `src/lib/env.d.ts`。
 - `pnpm smoke` 覆盖 Phase 8 的最小页面流：首页/路由、营业额录入边界、票据 intake/review rehydration、月分析和日历页面。
 
+### Build Artifact Secret Guard
+
+`pnpm build` runs a postbuild check that fails if `dist/server/.dev.vars` exists. If the check fails, remove that generated file and keep runtime secrets in `.dev.vars` locally or Wrangler secrets remotely.
+
 ## Cloudflare 资源
 
 `wrangler.jsonc` 依赖以下 Cloudflare bindings：
