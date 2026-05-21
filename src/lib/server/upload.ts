@@ -70,6 +70,7 @@ export async function uploadInvoiceSourceDocument(input: {
   let objectStored = false
   let sourceDocumentStored = false
   let intakeJobStored = false
+  let uploadedObjectAdoptedByExistingSource = false
 
   try {
     await rawDocumentsBucket.put(r2Key, input.file, {
@@ -139,6 +140,9 @@ export async function uploadInvoiceSourceDocument(input: {
         contentHash,
         uploadedR2Key: objectStored ? r2Key : null,
         error,
+        onUploadedObjectAdopted: () => {
+          uploadedObjectAdoptedByExistingSource = true
+        },
       })
     } catch (recoveryError) {
       await recoverFailedUpload({
@@ -147,7 +151,7 @@ export async function uploadInvoiceSourceDocument(input: {
         r2Key,
         sourceDocumentId,
         jobId,
-        objectStored,
+        objectStored: objectStored && !uploadedObjectAdoptedByExistingSource,
         sourceDocumentStored,
         intakeJobStored,
         error: recoveryError,
@@ -157,7 +161,11 @@ export async function uploadInvoiceSourceDocument(input: {
     }
 
     if (recoveredDuplicate) {
-      if (objectStored && recoveredDuplicate.r2Key !== r2Key) {
+      if (
+        objectStored &&
+        !uploadedObjectAdoptedByExistingSource &&
+        recoveredDuplicate.r2Key !== r2Key
+      ) {
         await Promise.allSettled([rawDocumentsBucket.delete(r2Key)])
       }
 
@@ -170,7 +178,7 @@ export async function uploadInvoiceSourceDocument(input: {
       r2Key,
       sourceDocumentId,
       jobId,
-      objectStored,
+      objectStored: objectStored && !uploadedObjectAdoptedByExistingSource,
       sourceDocumentStored,
       intakeJobStored,
       error,
@@ -228,6 +236,7 @@ async function recoverDuplicateUploadConflict(input: {
   contentHash: string
   uploadedR2Key: string | null
   error: unknown
+  onUploadedObjectAdopted?: () => void
 }) {
   if (!isContentHashUniqueConstraintError(input.error)) {
     return null
@@ -265,6 +274,7 @@ async function recoverDuplicateUploadConflict(input: {
       r2Key: existingSourceDocument.r2Key,
     },
     uploadedR2Key: input.uploadedR2Key,
+    onUploadedObjectAdopted: input.onUploadedObjectAdopted,
   })
 
   if (!sourceDocument) {
@@ -621,6 +631,7 @@ async function resolveReusableSourceDocumentObject(input: {
   rawDocumentsBucket: R2Bucket
   sourceDocument: ExistingInvoiceSourceDocumentRow & { r2Key: string }
   uploadedR2Key: string | null
+  onUploadedObjectAdopted?: () => void
 }) {
   if (await r2ObjectExists(input.rawDocumentsBucket, input.sourceDocument.r2Key)) {
     return input.sourceDocument
@@ -650,6 +661,8 @@ async function resolveReusableSourceDocumentObject(input: {
   if ((result.meta?.changes ?? 0) !== 1) {
     return null
   }
+
+  input.onUploadedObjectAdopted?.()
 
   return {
     ...input.sourceDocument,

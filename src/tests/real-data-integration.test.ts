@@ -544,6 +544,60 @@ describe('invoice upload D1 integration', () => {
     ])
   })
 
+  test('uploading identical file bytes preserves a healed R2 object when queue send fails', async () => {
+    const oldR2Key =
+      'raw-documents/2026/04/src-missing-old-object-queue-fail-invoice.pdf'
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-missing-old-object-queue-fail',
+          r2_key: oldR2Key,
+          content_hash:
+            '8af8156ccc437479646494ef7f4d4305ecab9a55442eaefad91b4b972dab51b2',
+          status: 'error',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-missing-old-object-queue-fail',
+          source_document_id: 'src-missing-old-object-queue-fail',
+          stage: 'error',
+          error_message: 'R2 object not found',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+    env.INTAKE_QUEUE = createFakeQueue({ failSend: true })
+
+    await expect(
+      uploadInvoiceSourceDocument({
+        env,
+        file: new File(
+          ['queue-failure-missing-old-object-bytes'],
+          'invoice-retry.pdf',
+          {
+            type: 'application/pdf',
+          },
+        ),
+      }),
+    ).rejects.toThrow('Queue send failed')
+
+    const healedR2Key = tables.source_documents[0].r2_key
+    expect(healedR2Key).not.toBeNull()
+    expect(healedR2Key).not.toBe(oldR2Key)
+    expect(tables.source_documents[0]).toMatchObject({
+      id: 'src-missing-old-object-queue-fail',
+      r2_key: healedR2Key,
+      status: 'error',
+    })
+    expect(await env.RAW_DOCUMENTS.head(healedR2Key as string)).not.toBeNull()
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-missing-old-object-queue-fail',
+      stage: 'error',
+    })
+  })
+
   test('uploading identical file bytes creates one queued job for an existing source without jobs', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [
@@ -2878,12 +2932,16 @@ interface FakeQueue {
   send: (message: unknown) => Promise<void>
 }
 
-function createFakeQueue(): Queue & FakeQueue {
+function createFakeQueue(options: { failSend?: boolean } = {}): Queue & FakeQueue {
   const sentMessages: unknown[] = []
 
   return {
     sentMessages,
     send: async (message: unknown) => {
+      if (options.failSend) {
+        throw new Error('Queue send failed')
+      }
+
       sentMessages.push(message)
     },
   } as Queue & FakeQueue
