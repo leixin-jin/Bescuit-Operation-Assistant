@@ -136,11 +136,13 @@ describe('dashboard and analytics D1 integration', () => {
           entry_date: '2026-04-05',
           category: 'beer',
           amount: 60,
+          vendor: 'Beer Supplier',
         }),
         createLedgerRow({
           entry_date: '2026-04-12',
           category: 'food',
           amount: 40,
+          vendor: 'Food Supplier',
         }),
       ],
     })
@@ -163,8 +165,8 @@ describe('dashboard and analytics D1 integration', () => {
       { name: 'EFECTIVO', value: 40, percentage: 20 },
     ])
     expect(monthlySummary.expenseBreakdown).toEqual([
-      { name: 'beer', value: 60, percentage: 60 },
-      { name: 'food', value: 40, percentage: 40 },
+      { name: 'Beer Supplier', value: 60, percentage: 60 },
+      { name: 'Food Supplier', value: 40, percentage: 40 },
     ])
     expect(tables.sales_daily).toHaveLength(2)
   })
@@ -1404,6 +1406,7 @@ class FakeD1PreparedStatement {
         .map((row) => ({
           entryDate: row.entry_date,
           category: row.category,
+          vendor: row.vendor,
           amount: row.amount,
         }))
     }

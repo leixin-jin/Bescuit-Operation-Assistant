@@ -158,9 +158,13 @@ function AnalyticsMonthlyPage() {
               <div className="space-y-4">
                 {analyticsSummary.expenseBreakdown.map((item, index) => (
                   <div key={item.name}>
-                    <div className="mb-1 flex items-center justify-between text-sm">
-                      <span>{item.name}</span>
-                      <span className="font-medium">€{item.value.toLocaleString()}</span>
+                    <div className="mb-1 flex items-center justify-between gap-4 text-sm">
+                      <span className="min-w-0 truncate" title={item.name}>
+                        {item.name}
+                      </span>
+                      <span className="shrink-0 font-medium">
+                        €{item.value.toLocaleString()}
+                      </span>
                     </div>
                     <div className="h-2.5 overflow-hidden rounded-full bg-secondary">
                       <div

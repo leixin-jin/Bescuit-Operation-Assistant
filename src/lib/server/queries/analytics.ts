@@ -31,6 +31,7 @@ interface SalesAnalyticsRow {
 interface ExpenseAnalyticsRow {
   entryDate: string
   category: string
+  vendor: string | null
   amount: number
 }
 
@@ -161,6 +162,7 @@ async function listExpenseRowsForMonth(env: Partial<AppBindings>, month: string)
     SELECT
       entry_date AS entryDate,
       category,
+      vendor,
       amount
     FROM ledger_entries
     WHERE entry_type = 'expense'
@@ -260,16 +262,17 @@ function buildIncomeBreakdown(salesRows: SalesAnalyticsRow[]) {
 }
 
 function buildExpenseBreakdown(expenseRows: ExpenseAnalyticsRow[]) {
-  const totalsByCategory = new Map<string, number>()
+  const totalsBySupplier = new Map<string, number>()
 
   for (const row of expenseRows) {
-    totalsByCategory.set(
-      row.category,
-      roundCurrency((totalsByCategory.get(row.category) ?? 0) + row.amount),
+    const supplierName = row.vendor?.trim() || row.category
+    totalsBySupplier.set(
+      supplierName,
+      roundCurrency((totalsBySupplier.get(supplierName) ?? 0) + row.amount),
     )
   }
 
-  return Array.from(totalsByCategory.entries()).map(([name, value]) => ({
+  return Array.from(totalsBySupplier.entries()).map(([name, value]) => ({
     name,
     value,
   }))
