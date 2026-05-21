@@ -30,6 +30,10 @@ interface IntakeSourceRow {
   sourceDocumentId: string
 }
 
+interface InvoiceIdRow {
+  id: string
+}
+
 interface IntakeStageRow {
   stage: string
 }
@@ -364,7 +368,7 @@ async function writeConfirmedInvoiceAccounting(
   await assertInvoiceReviewDraftWritable(db, job.jobId)
   const sourceDocumentId = await getSourceDocumentId(db, job.jobId)
   const invoiceId = getInvoiceId(job.jobId)
-  const ledgerEntryId = getLedgerEntryId(invoiceId)
+  const invoiceDedupeKey = getInvoiceDedupeKey(job)
   const totalAmount = parseCurrencyAmount(job.header.totalAmount)
   const taxAmount = parseCurrencyAmount(job.header.taxAmount)
   const subtotalAmount = roundCurrency(totalAmount - taxAmount)
@@ -382,17 +386,19 @@ async function writeConfirmedInvoiceAccounting(
         tax_amount,
         total_amount,
         source_document_id,
+        dedupe_key,
         review_status,
         updated_at
       )
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?
       WHERE EXISTS (
         SELECT 1
         FROM intake_jobs
         WHERE intake_jobs.id = ?
           AND intake_jobs.stage = 'ready'
       )
-      ON CONFLICT(id) DO UPDATE SET
+      ON CONFLICT(dedupe_key) DO UPDATE SET
+        intake_job_id = excluded.intake_job_id,
         invoice_date = excluded.invoice_date,
         supplier_name = excluded.supplier_name,
         document_number = excluded.document_number,
@@ -413,12 +419,16 @@ async function writeConfirmedInvoiceAccounting(
       taxAmount,
       totalAmount,
       sourceDocumentId,
+      invoiceDedupeKey,
       now,
       job.jobId,
     )
     .run()
 
   assertInvoiceMutationChanged(invoiceUpsertResult, '发票任务正在删除，不能保存或确认。')
+
+  const persistedInvoiceId = await getPersistedInvoiceId(db, invoiceDedupeKey)
+  const ledgerEntryId = getLedgerEntryId(persistedInvoiceId)
 
   const statements: D1PreparedStatement[] = [
     db
@@ -427,7 +437,7 @@ async function writeConfirmedInvoiceAccounting(
         DELETE FROM invoice_items
         WHERE invoice_id = ?`,
       )
-      .bind(invoiceId),
+      .bind(persistedInvoiceId),
     ...job.lineItems.map((item, index) =>
       db
         .prepare(
@@ -449,8 +459,8 @@ async function writeConfirmedInvoiceAccounting(
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
-          getInvoiceItemId(invoiceId, index),
-          invoiceId,
+          getInvoiceItemId(persistedInvoiceId, index),
+          persistedInvoiceId,
           item.name.trim(),
           parseOptionalCurrencyAmount(item.qty),
           item.unit.trim() || null,
@@ -490,7 +500,7 @@ async function writeConfirmedInvoiceAccounting(
         job.header.date,
         totalAmount,
         job.header.supplier.trim(),
-        invoiceId,
+        persistedInvoiceId,
         now,
       ),
   ]
@@ -551,6 +561,25 @@ async function getSourceDocumentId(db: D1Database, jobId: string) {
   return sourceDocumentId
 }
 
+async function getPersistedInvoiceId(db: D1Database, dedupeKey: string) {
+  const rows = await allD1<InvoiceIdRow>(
+    db,
+    `/* invoice:get-persisted-invoice-id */
+    SELECT id
+    FROM invoices
+    WHERE dedupe_key = ?
+    LIMIT 1`,
+    [dedupeKey],
+  )
+  const invoiceId = rows[0]?.id
+
+  if (!invoiceId) {
+    throw new Error(`Confirmed invoice was not persisted: ${dedupeKey}`)
+  }
+
+  return invoiceId
+}
+
 async function assertInvoiceReviewDraftWritable(db: D1Database, jobId: string) {
   const rows = await allD1<IntakeStageRow>(
     db,
@@ -586,6 +615,14 @@ function calculateLineTotal(quantity: string, unitPrice: string) {
 
 function getInvoiceId(jobId: string) {
   return `inv_${jobId}`
+}
+
+function getInvoiceDedupeKey(job: InvoiceReviewJob) {
+  return [
+    job.header.supplier.trim().toLowerCase(),
+    job.header.invoiceNo.trim(),
+    job.header.date.trim(),
+  ].join('|')
 }
 
 function getInvoiceItemId(invoiceId: string, index: number) {

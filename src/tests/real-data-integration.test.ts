@@ -859,6 +859,67 @@ describe('invoice review D1 integration', () => {
     })
   })
 
+  test('confirming the same supplier invoice from two jobs reuses invoice and ledger rows', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-a',
+          original_filename: 'invoice-a.pdf',
+        }),
+        createSourceDocumentRow({
+          id: 'src-b',
+          original_filename: 'invoice-b.pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-a',
+          source_document_id: 'src-a',
+          stage: 'needs_review',
+        }),
+        createIntakeJobRow({
+          id: 'job-b',
+          source_document_id: 'src-b',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        createExtractionResultRow({
+          id: 'ext-job-a',
+          intake_job_id: 'job-a',
+        }),
+        createExtractionResultRow({
+          id: 'ext-job-b',
+          intake_job_id: 'job-b',
+        }),
+      ],
+    })
+    const firstJob = createReadyReviewJob({ jobId: 'job-a', fileName: 'invoice-a.pdf' })
+    const secondJob = createReadyReviewJob({
+      jobId: 'job-b',
+      fileName: 'invoice-b.pdf',
+    })
+
+    await expect(confirmInvoiceReviewJobInDatabase(env, firstJob)).resolves.toMatchObject({
+      ok: true,
+    })
+    await expect(confirmInvoiceReviewJobInDatabase(env, secondJob)).resolves.toMatchObject({
+      ok: true,
+    })
+
+    expect(tables.invoices).toHaveLength(1)
+    expect(tables.invoice_items).toHaveLength(1)
+    expect(tables.ledger_entries).toHaveLength(1)
+    expect(tables.invoices[0]).toMatchObject({
+      supplier_name: 'Makro Madrid',
+      document_number: 'MK-001',
+      invoice_date: '2026-04-20',
+      total_amount: 121,
+      dedupe_key: 'makro madrid|MK-001|2026-04-20',
+    })
+    expect(tables.ledger_entries[0]?.source_id).toBe(tables.invoices[0]?.id)
+  })
+
   test('confirming an invoice no longer requires ingredient mapping and preserves stored tax-included totals', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [createSourceDocumentRow({ id: 'src-tax-included' })],
@@ -1730,6 +1791,7 @@ interface IngredientRow {
 interface InvoiceRow {
   id: string
   intake_job_id: string | null
+  dedupe_key: string
   invoice_date: string
   supplier_name: string
   document_number: string
@@ -1964,6 +2026,12 @@ class FakeD1PreparedStatement {
       const [jobId] = this.params
       const job = this.tables.intake_jobs.find((row) => row.id === jobId)
       return job ? [{ sourceDocumentId: job.source_document_id }] : []
+    }
+
+    if (sql.includes('invoice:get-persisted-invoice-id')) {
+      const [dedupeKey] = this.params
+      const invoice = this.tables.invoices.find((row) => row.dedupe_key === dedupeKey)
+      return invoice ? [{ id: invoice.id }] : []
     }
 
     if (sql.includes('invoice-upload:find-duplicate')) {
@@ -2610,6 +2678,7 @@ class FakeD1PreparedStatement {
         taxAmount,
         totalAmount,
         sourceDocumentId,
+        dedupeKey,
         now,
         guardJobId,
       ] = this.params
@@ -2621,10 +2690,13 @@ class FakeD1PreparedStatement {
         return 0
       }
 
-      const existingRow = this.tables.invoices.find((row) => row.id === id)
+      const existingRow =
+        this.tables.invoices.find((row) => row.dedupe_key === dedupeKey) ??
+        this.tables.invoices.find((row) => row.id === id)
       const nextRow: InvoiceRow = {
         id: String(id),
         intake_job_id: String(intakeJobId),
+        dedupe_key: String(dedupeKey),
         invoice_date: String(invoiceDate),
         supplier_name: String(supplierName),
         document_number: String(documentNumber),
@@ -2640,7 +2712,10 @@ class FakeD1PreparedStatement {
       }
 
       if (existingRow) {
-        Object.assign(existingRow, nextRow, { created_at: existingRow.created_at })
+        Object.assign(existingRow, nextRow, {
+          id: existingRow.id,
+          created_at: existingRow.created_at,
+        })
       } else {
         this.tables.invoices.push(nextRow)
       }
@@ -2819,10 +2894,26 @@ function createIngredientRow(overrides: Partial<IngredientRow> = {}): Ingredient
   }
 }
 
+function createExtractionResultRow(
+  overrides: Partial<ExtractionResultRow> = {},
+): ExtractionResultRow {
+  return {
+    id: 'ext-job-1',
+    intake_job_id: 'job-1',
+    markdown_text: '',
+    structured_json: null,
+    raw_response: null,
+    schema_version: 'invoice-extraction-v1',
+    created_at: '2026-04-27T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
 function createInvoiceRow(overrides: Partial<InvoiceRow> = {}): InvoiceRow {
   return {
     id: 'inv-1',
     intake_job_id: 'job-1',
+    dedupe_key: 'supplier|INV-1|2026-04-27',
     invoice_date: '2026-04-27',
     supplier_name: 'Supplier',
     document_number: 'INV-1',
@@ -2839,7 +2930,22 @@ function createInvoiceRow(overrides: Partial<InvoiceRow> = {}): InvoiceRow {
   }
 }
 
-function createReadyReviewJob(): InvoiceReviewJob {
+function createReadyReviewJob(
+  overrides: Partial<Omit<InvoiceReviewJob, 'header' | 'lineItems'>> & {
+    header?: Partial<InvoiceReviewJob['header']>
+    lineItems?: InvoiceReviewJob['lineItems']
+  } = {},
+): InvoiceReviewJob {
+  const header = {
+    supplier: 'Makro Madrid',
+    invoiceNo: 'MK-001',
+    date: '2026-04-20',
+    totalAmount: '121.00',
+    taxAmount: '21.00',
+    notes: '',
+    ...overrides.header,
+  }
+
   return {
     jobId: 'job-1',
     fileName: 'invoice.pdf',
@@ -2848,15 +2954,9 @@ function createReadyReviewJob(): InvoiceReviewJob {
     status: 'needs_review',
     stage: 'needs_review',
     errorMessage: null,
-    header: {
-      supplier: 'Makro Madrid',
-      invoiceNo: 'MK-001',
-      date: '2026-04-20',
-      totalAmount: '121.00',
-      taxAmount: '21.00',
-      notes: '',
-    },
-    lineItems: [
+    ...overrides,
+    header,
+    lineItems: overrides.lineItems ?? [
       {
         id: 'line-1',
         name: 'Coke 330ml',
