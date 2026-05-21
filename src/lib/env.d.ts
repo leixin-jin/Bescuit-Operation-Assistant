@@ -13,6 +13,9 @@ declare namespace Cloudflare {
 		INVOICE_EXTRACTION_PROVIDER: "gemini";
 		INVOICE_EXTRACTION_MODEL: "gemini-3.1-flash-lite";
 		INVOICE_PDF_INPUT_MODE: "native-pdf";
+		MODE?: string;
+		APP_BASIC_AUTH_USER?: string;
+		APP_BASIC_AUTH_PASSWORD?: string;
 	}
 }
 interface Env extends Cloudflare.Env {}

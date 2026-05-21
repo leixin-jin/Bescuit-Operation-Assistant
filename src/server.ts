@@ -12,6 +12,12 @@ import {
 
 export default {
   fetch(request: Request, env: AppBindings, ctx: ExecutionContext) {
+    const authResponse = requireAppBasicAuth(request, env as Partial<Env>)
+
+    if (authResponse) {
+      return authResponse
+    }
+
     const url = new URL(request.url)
     const documentPreviewPrefix = '/api/invoice-document-preview/'
 
@@ -71,4 +77,29 @@ export default {
       }
     }
   },
+}
+
+function requireAppBasicAuth(request: Request, env: Partial<Env>) {
+  const user = env.APP_BASIC_AUTH_USER
+  const password = env.APP_BASIC_AUTH_PASSWORD
+  const shouldRequireAuth = env.MODE === 'production' || Boolean(user || password)
+
+  if (!shouldRequireAuth) {
+    return null
+  }
+
+  if (!user || !password) {
+    return new Response('Application auth is not configured', { status: 500 })
+  }
+
+  if (request.headers.get('Authorization') === `Basic ${btoa(`${user}:${password}`)}`) {
+    return null
+  }
+
+  return new Response('Authentication required', {
+    status: 401,
+    headers: {
+      'WWW-Authenticate': 'Basic realm="Bescuit Operation Assistant"',
+    },
+  })
 }
