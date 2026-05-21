@@ -26,6 +26,7 @@ import {
 } from '@/lib/server/mutations/invoices.rpc'
 import { processInvoiceIntakeQueueMessage } from '@/lib/server/extraction'
 import { assertDemoDataEnabled } from '@/lib/server/runtime-config'
+import { uploadInvoiceSourceDocument } from '@/lib/server/upload'
 
 describe('real data integration boundaries', () => {
   test('production business data modules do not import fallback-store directly', () => {
@@ -211,6 +212,33 @@ describe('dashboard and analytics D1 integration', () => {
     expect(summary.pendingInvoiceCount).toBe(1)
     expect(summary.monthlyInvoiceCount).toBe(1)
     expect(summary.monthlyExpenseTotal).toBe(88)
+  })
+})
+
+describe('invoice upload D1 integration', () => {
+  test('uploading identical file bytes reuses the existing intake job', async () => {
+    const { env, tables } = createFakeD1Env()
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const first = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['same-invoice-bytes'], 'invoice-a.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+    const second = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['same-invoice-bytes'], 'invoice-b.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(second).toEqual(first)
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(await env.RAW_DOCUMENTS.get(first.r2Key)).not.toBeNull()
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(1)
   })
 })
 
@@ -1193,6 +1221,7 @@ interface SourceDocumentRow {
   r2_key: string | null
   original_filename: string
   mime_type: string | null
+  content_hash: string | null
   uploaded_by: string | null
   status: string
   uploaded_at: string
@@ -1471,6 +1500,31 @@ class FakeD1PreparedStatement {
       return job ? [{ sourceDocumentId: job.source_document_id }] : []
     }
 
+    if (sql.includes('invoice-upload:find-duplicate')) {
+      const [contentHash] = this.params
+      return this.tables.intake_jobs
+        .filter((job) => job.stage !== 'deleting')
+        .map((job) => {
+          const sourceDocument = this.tables.source_documents.find(
+            (row) =>
+              row.id === job.source_document_id && row.content_hash === contentHash,
+          )
+
+          return sourceDocument
+            ? {
+                jobId: job.id,
+                sourceDocumentId: sourceDocument.id,
+                r2Key: sourceDocument.r2_key,
+                createdAt: job.created_at,
+              }
+            : null
+        })
+        .filter((row): row is NonNullable<typeof row> => row !== null)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .slice(0, 1)
+        .map(({ createdAt: _createdAt, ...row }) => row)
+    }
+
     if (sql.includes('invoice:review-draft-stage')) {
       const [jobId] = this.params
       const job = this.tables.intake_jobs.find((row) => row.id === jobId)
@@ -1571,6 +1625,66 @@ class FakeD1PreparedStatement {
       } else {
         this.tables.sales_daily.push(nextRow)
       }
+      return 1
+    }
+
+    if (sql.includes('insert into "source_documents"')) {
+      const [
+        id,
+        sourceType,
+        documentTypeGuess,
+        r2Key,
+        originalFilename,
+        mimeType,
+        maybeContentHash,
+        maybeUploadedBy,
+        maybeStatus,
+        maybeUploadedAt,
+      ] = this.params
+      const hasContentHash = this.params.length === 10
+      this.tables.source_documents.push({
+        id: String(id),
+        source_type: String(sourceType),
+        document_type_guess: String(documentTypeGuess),
+        r2_key: r2Key === null ? null : String(r2Key),
+        original_filename: String(originalFilename),
+        mime_type: mimeType === null ? null : String(mimeType),
+        content_hash: hasContentHash
+          ? maybeContentHash === null
+            ? null
+            : String(maybeContentHash)
+          : null,
+        uploaded_by: (hasContentHash ? maybeUploadedBy : maybeContentHash) === null
+          ? null
+          : String(hasContentHash ? maybeUploadedBy : maybeContentHash),
+        status: String(hasContentHash ? maybeStatus : maybeUploadedBy),
+        uploaded_at: String(hasContentHash ? maybeUploadedAt : maybeStatus),
+      })
+      return 1
+    }
+
+    if (sql.includes('insert into "intake_jobs"')) {
+      const [
+        id,
+        sourceDocumentId,
+        extractorProvider,
+        extractorModel,
+        stage,
+        createdAt,
+        updatedAt,
+      ] = this.params
+      this.tables.intake_jobs.push({
+        id: String(id),
+        source_document_id: String(sourceDocumentId),
+        extractor_provider:
+          extractorProvider === null ? null : String(extractorProvider),
+        extractor_model: extractorModel === null ? null : String(extractorModel),
+        stage: String(stage),
+        confidence_score: null,
+        error_message: null,
+        created_at: String(createdAt),
+        updated_at: String(updatedAt),
+      })
       return 1
     }
 
@@ -2012,6 +2126,7 @@ function createSourceDocumentRow(
     r2_key: 'raw-documents/2026/04/src-1-invoice.pdf',
     original_filename: 'invoice.pdf',
     mime_type: 'application/pdf',
+    content_hash: null,
     uploaded_by: null,
     status: 'processed',
     uploaded_at: '2026-04-27T10:00:00.000Z',
@@ -2124,5 +2239,32 @@ function createFakeR2Bucket(
     delete: async (key: string) => {
       objectMap.delete(key)
     },
+    put: async (
+      key: string,
+      value: File,
+      options?: { httpMetadata?: { contentType?: string } },
+    ) => {
+      objectMap.set(key, {
+        body: await value.text(),
+        contentType:
+          options?.httpMetadata?.contentType || value.type || 'application/octet-stream',
+      })
+    },
   } as unknown as R2Bucket
+}
+
+interface FakeQueue {
+  sentMessages: unknown[]
+  send: (message: unknown) => Promise<void>
+}
+
+function createFakeQueue(): Queue & FakeQueue {
+  const sentMessages: unknown[] = []
+
+  return {
+    sentMessages,
+    send: async (message: unknown) => {
+      sentMessages.push(message)
+    },
+  } as Queue & FakeQueue
 }
