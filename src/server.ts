@@ -92,7 +92,12 @@ function requireAppBasicAuth(request: Request, env: Partial<Env>) {
     return new Response('Application auth is not configured', { status: 500 })
   }
 
-  if (request.headers.get('Authorization') === `Basic ${btoa(`${user}:${password}`)}`) {
+  const [scheme, credentials] = request.headers.get('Authorization')?.split(' ') ?? []
+
+  if (
+    scheme?.toLowerCase() === 'basic' &&
+    credentials === btoa(`${user}:${password}`)
+  ) {
     return null
   }
 

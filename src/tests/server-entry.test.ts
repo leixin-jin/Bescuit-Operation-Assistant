@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
+import { getInvoiceDocumentPreviewResponse } from '@/lib/server/queries/document-preview'
 
 vi.mock('@tanstack/react-start/server-entry', () => ({
   default: {
@@ -62,5 +63,83 @@ describe('worker entry auth', () => {
 
     expect(response.status).toBe(200)
     expect(await response.text()).toBe('app ok')
+  })
+
+  test('fails closed when production auth credentials are not configured', async () => {
+    const response = await server.fetch(
+      new Request('https://app.example.test/'),
+      { MODE: 'production' },
+      ctx,
+    )
+
+    expect(response.status).toBe(500)
+    expect(await response.text()).toBe('Application auth is not configured')
+  })
+
+  test('rejects wrong Basic credentials', async () => {
+    const response = await server.fetch(
+      new Request('https://app.example.test/', {
+        headers: {
+          Authorization: `Basic ${btoa('admin:wrong')}`,
+        },
+      }),
+      {
+        MODE: 'production',
+        APP_BASIC_AUTH_USER: 'admin',
+        APP_BASIC_AUTH_PASSWORD: 'secret',
+      },
+      ctx,
+    )
+
+    expect(response.status).toBe(401)
+  })
+
+  test('requires auth outside production when auth secrets are present', async () => {
+    const response = await server.fetch(
+      new Request('https://app.example.test/'),
+      {
+        MODE: 'development',
+        APP_BASIC_AUTH_USER: 'admin',
+        APP_BASIC_AUTH_PASSWORD: 'secret',
+      },
+      ctx,
+    )
+
+    expect(response.status).toBe(401)
+  })
+
+  test('blocks invoice document previews before preview handling', async () => {
+    vi.mocked(getInvoiceDocumentPreviewResponse).mockClear()
+
+    const response = await server.fetch(
+      new Request('https://app.example.test/api/invoice-document-preview/job-1'),
+      {
+        MODE: 'production',
+        APP_BASIC_AUTH_USER: 'admin',
+        APP_BASIC_AUTH_PASSWORD: 'secret',
+      },
+      ctx,
+    )
+
+    expect(response.status).toBe(401)
+    expect(getInvoiceDocumentPreviewResponse).not.toHaveBeenCalled()
+  })
+
+  test('accepts case-insensitive Basic scheme', async () => {
+    const response = await server.fetch(
+      new Request('https://app.example.test/', {
+        headers: {
+          Authorization: `basic ${btoa('admin:secret')}`,
+        },
+      }),
+      {
+        MODE: 'production',
+        APP_BASIC_AUTH_USER: 'admin',
+        APP_BASIC_AUTH_PASSWORD: 'secret',
+      },
+      ctx,
+    )
+
+    expect(response.status).toBe(200)
   })
 })

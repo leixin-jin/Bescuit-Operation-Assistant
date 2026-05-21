@@ -59,7 +59,7 @@ wrangler secret put APP_BASIC_AUTH_USER
 wrangler secret put APP_BASIC_AUTH_PASSWORD
 ```
 
-When `MODE=production`, missing auth secrets return HTTP 500 so the app cannot be accidentally published without an access gate.
+`wrangler.jsonc` sets `MODE=production` for deployed Workers. When `MODE=production`, missing auth secrets return HTTP 500 so the app cannot be accidentally published without an access gate.
 
 Queue 抽取流程直接把 R2 中的 PDF/图片 bytes 传给 provider，并校验 `invoice-extraction-v2` JSON schema；不会再调用 Workers AI `toMarkdown()` 作为生产抽取路径。
 

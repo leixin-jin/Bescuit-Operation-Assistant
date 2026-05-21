@@ -14,6 +14,8 @@ export interface AppBindings {
   AI_GATEWAY_API_TOKEN?: string
   ENABLE_DEMO_DATA?: string
   VITE_ENABLE_DEMO_DATA?: string
+  APP_BASIC_AUTH_USER?: string
+  APP_BASIC_AUTH_PASSWORD?: string
   MODE?: string
   NODE_ENV?: string
 }
