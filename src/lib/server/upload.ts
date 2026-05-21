@@ -4,7 +4,7 @@ import { getDb } from '@/lib/db/client'
 import { intakeJobs, sourceDocuments } from '@/lib/db/schema'
 import type { AppBindings } from '@/lib/server/bindings'
 import { requireBinding } from '@/lib/server/bindings'
-import { allD1, requireD1Database } from '@/lib/server/d1'
+import { allD1, firstD1, requireD1Database } from '@/lib/server/d1'
 import { enqueueInvoiceIntakeJob } from '@/lib/server/queue'
 import { selectInvoiceExtractionProvider } from '@/lib/server/extraction'
 
@@ -23,6 +23,12 @@ interface ExistingInvoiceUploadRow {
 interface ExistingInvoiceSourceDocumentRow {
   sourceDocumentId: string
   r2Key: string | null
+  fileName: string
+  mimeType: string | null
+  uploadedAt: string
+}
+
+interface ExistingInvoiceJobRow extends ExistingInvoiceUploadRow {
   fileName: string
   mimeType: string | null
   uploadedAt: string
@@ -87,17 +93,28 @@ export async function uploadInvoiceSourceDocument(input: {
     })
     sourceDocumentStored = true
 
-    const provider = selectInvoiceExtractionProvider(input.env)
-
-    await db.insert(intakeJobs).values({
-      id: jobId,
+    const jobInserted = await insertQueuedInvoiceJobIfNoActive({
+      env: input.env,
+      d1,
+      jobId,
       sourceDocumentId,
-      extractorProvider: provider.id,
-      extractorModel: provider.model,
-      stage: 'queued',
-      createdAt: uploadedAt,
-      updatedAt: uploadedAt,
+      queuedAt: uploadedAt,
     })
+
+    if (!jobInserted) {
+      const activeJob = await findExistingInvoiceUploadForSource(d1, sourceDocumentId)
+
+      if (activeJob?.r2Key) {
+        return {
+          jobId: activeJob.jobId,
+          sourceDocumentId: activeJob.sourceDocumentId,
+          r2Key: activeJob.r2Key,
+        } satisfies InvoiceUploadResult
+      }
+
+      throw new Error('Unable to create or recover an invoice intake job.')
+    }
+
     intakeJobStored = true
 
     await enqueueInvoiceIntakeJob(input.env, {
@@ -109,6 +126,24 @@ export async function uploadInvoiceSourceDocument(input: {
       uploadedAt,
     })
   } catch (error) {
+    const recoveredDuplicate = await recoverDuplicateUploadConflict({
+      env: input.env,
+      db,
+      d1,
+      rawDocumentsBucket,
+      contentHash,
+      uploadedR2Key: objectStored ? r2Key : null,
+      error,
+    })
+
+    if (recoveredDuplicate) {
+      if (objectStored && recoveredDuplicate.r2Key !== r2Key) {
+        await Promise.allSettled([rawDocumentsBucket.delete(r2Key)])
+      }
+
+      return recoveredDuplicate
+    }
+
     await recoverFailedUpload({
       db,
       rawDocumentsBucket,
@@ -120,18 +155,6 @@ export async function uploadInvoiceSourceDocument(input: {
       intakeJobStored,
       error,
     })
-
-    const recoveredDuplicate = await recoverDuplicateUploadConflict({
-      env: input.env,
-      db,
-      d1,
-      contentHash,
-      error,
-    })
-
-    if (recoveredDuplicate) {
-      return recoveredDuplicate
-    }
 
     throw error
   }
@@ -181,7 +204,9 @@ async function recoverDuplicateUploadConflict(input: {
   env: AppBindings
   db: NonNullable<ReturnType<typeof getDb>>
   d1: D1Database
+  rawDocumentsBucket: R2Bucket
   contentHash: string
+  uploadedR2Key: string | null
   error: unknown
 }) {
   if (!isContentHashUniqueConstraintError(input.error)) {
@@ -207,12 +232,27 @@ async function recoverDuplicateUploadConflict(input: {
     return null
   }
 
-  return createQueuedInvoiceJobForExistingSource({
-    env: input.env,
-    db: input.db,
+  const sourceDocument = await resolveReusableSourceDocumentObject({
+    d1: input.d1,
+    rawDocumentsBucket: input.rawDocumentsBucket,
     sourceDocument: {
       ...existingSourceDocument,
       r2Key: existingSourceDocument.r2Key,
+    },
+    uploadedR2Key: input.uploadedR2Key,
+  })
+
+  if (!sourceDocument) {
+    return null
+  }
+
+  return requeueOrCreateInvoiceJobForExistingSource({
+    env: input.env,
+    db: input.db,
+    d1: input.d1,
+    sourceDocument: {
+      ...sourceDocument,
+      r2Key: sourceDocument.r2Key,
     },
   })
 }
@@ -243,25 +283,90 @@ async function findExistingInvoiceSourceDocument(
   return rows[0] ?? null
 }
 
-async function createQueuedInvoiceJobForExistingSource(input: {
+async function requeueOrCreateInvoiceJobForExistingSource(input: {
   env: AppBindings
   db: NonNullable<ReturnType<typeof getDb>>
+  d1: D1Database
   sourceDocument: ExistingInvoiceSourceDocumentRow & { r2Key: string }
 }) {
-  const jobId = `job_${crypto.randomUUID()}`
   const queuedAt = new Date().toISOString()
-  const provider = selectInvoiceExtractionProvider(input.env)
   const mimeType = input.sourceDocument.mimeType || 'application/octet-stream'
+  const errorJob = await findLatestErrorInvoiceJobForSource(
+    input.d1,
+    input.sourceDocument.sourceDocumentId,
+  )
 
-  await input.db.insert(intakeJobs).values({
-    id: jobId,
+  if (errorJob) {
+    const claimed = await requeueErrorInvoiceJobIfNoActive({
+      env: input.env,
+      d1: input.d1,
+      jobId: errorJob.jobId,
+      sourceDocumentId: input.sourceDocument.sourceDocumentId,
+      queuedAt,
+    })
+
+    if (claimed) {
+      await input.db
+        .update(sourceDocuments)
+        .set({
+          status: 'uploaded',
+        })
+        .where(eq(sourceDocuments.id, input.sourceDocument.sourceDocumentId))
+
+      await enqueueClaimedInvoiceJob({
+        env: input.env,
+        db: input.db,
+        sourceDocument: input.sourceDocument,
+        jobId: errorJob.jobId,
+        mimeType,
+      })
+
+      return {
+        jobId: errorJob.jobId,
+        sourceDocumentId: input.sourceDocument.sourceDocumentId,
+        r2Key: input.sourceDocument.r2Key,
+      } satisfies InvoiceUploadResult
+    }
+  }
+
+  const activeJob = await findExistingInvoiceUploadForSource(
+    input.d1,
+    input.sourceDocument.sourceDocumentId,
+  )
+
+  if (activeJob?.r2Key) {
+    return {
+      jobId: activeJob.jobId,
+      sourceDocumentId: activeJob.sourceDocumentId,
+      r2Key: activeJob.r2Key,
+    } satisfies InvoiceUploadResult
+  }
+
+  const jobId = `job_${crypto.randomUUID()}`
+  const jobInserted = await insertQueuedInvoiceJobIfNoActive({
+    env: input.env,
+    d1: input.d1,
+    jobId,
     sourceDocumentId: input.sourceDocument.sourceDocumentId,
-    extractorProvider: provider.id,
-    extractorModel: provider.model,
-    stage: 'queued',
-    createdAt: queuedAt,
-    updatedAt: queuedAt,
+    queuedAt,
   })
+
+  if (!jobInserted) {
+    const existingJob = await findExistingInvoiceUploadForSource(
+      input.d1,
+      input.sourceDocument.sourceDocumentId,
+    )
+
+    if (existingJob?.r2Key) {
+      return {
+        jobId: existingJob.jobId,
+        sourceDocumentId: existingJob.sourceDocumentId,
+        r2Key: existingJob.r2Key,
+      } satisfies InvoiceUploadResult
+    }
+
+    return null
+  }
 
   await input.db
     .update(sourceDocuments)
@@ -270,31 +375,224 @@ async function createQueuedInvoiceJobForExistingSource(input: {
     })
     .where(eq(sourceDocuments.id, input.sourceDocument.sourceDocumentId))
 
-  try {
-    await enqueueInvoiceIntakeJob(input.env, {
-      jobId,
-      sourceDocumentId: input.sourceDocument.sourceDocumentId,
-      r2Key: input.sourceDocument.r2Key,
-      fileName: input.sourceDocument.fileName,
-      mimeType,
-      uploadedAt: input.sourceDocument.uploadedAt,
-    })
-  } catch (error) {
-    await markQueuedDuplicateRecoveryFailed({
-      db: input.db,
-      sourceDocumentId: input.sourceDocument.sourceDocumentId,
-      jobId,
-      error,
-    })
-
-    throw error
-  }
+  await enqueueClaimedInvoiceJob({
+    env: input.env,
+    db: input.db,
+    sourceDocument: input.sourceDocument,
+    jobId,
+    mimeType,
+  })
 
   return {
     jobId,
     sourceDocumentId: input.sourceDocument.sourceDocumentId,
     r2Key: input.sourceDocument.r2Key,
   } satisfies InvoiceUploadResult
+}
+
+async function enqueueClaimedInvoiceJob(input: {
+  env: AppBindings
+  db: NonNullable<ReturnType<typeof getDb>>
+  sourceDocument: ExistingInvoiceSourceDocumentRow & { r2Key: string }
+  jobId: string
+  mimeType: string
+}) {
+  try {
+    await enqueueInvoiceIntakeJob(input.env, {
+      jobId: input.jobId,
+      sourceDocumentId: input.sourceDocument.sourceDocumentId,
+      r2Key: input.sourceDocument.r2Key,
+      fileName: input.sourceDocument.fileName,
+      mimeType: input.mimeType,
+      uploadedAt: input.sourceDocument.uploadedAt,
+    })
+  } catch (error) {
+    await markQueuedDuplicateRecoveryFailed({
+      db: input.db,
+      sourceDocumentId: input.sourceDocument.sourceDocumentId,
+      jobId: input.jobId,
+      error,
+    })
+
+    throw error
+  }
+}
+
+async function insertQueuedInvoiceJobIfNoActive(input: {
+  env: AppBindings
+  d1: D1Database
+  jobId: string
+  sourceDocumentId: string
+  queuedAt: string
+}) {
+  const provider = selectInvoiceExtractionProvider(input.env)
+  const result = await input.d1
+    .prepare(
+      `
+        /* invoice-upload:insert-job-if-no-active */
+        INSERT INTO intake_jobs (
+          id,
+          source_document_id,
+          extractor_provider,
+          extractor_model,
+          stage,
+          created_at,
+          updated_at
+        )
+        SELECT ?, ?, ?, ?, 'queued', ?, ?
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE source_document_id = ?
+            AND stage IN ('queued', 'extracting', 'needs_review', 'ready')
+        )
+      `,
+    )
+    .bind(
+      input.jobId,
+      input.sourceDocumentId,
+      provider.id,
+      provider.model,
+      input.queuedAt,
+      input.queuedAt,
+      input.sourceDocumentId,
+    )
+    .run()
+
+  return (result.meta?.changes ?? 0) === 1
+}
+
+async function findExistingInvoiceUploadForSource(
+  db: D1Database,
+  sourceDocumentId: string,
+) {
+  return firstD1<ExistingInvoiceJobRow>(
+    db,
+    `
+      /* invoice-upload:find-active-by-source */
+      SELECT intake_jobs.id AS jobId,
+        source_documents.id AS sourceDocumentId,
+        source_documents.r2_key AS r2Key,
+        source_documents.original_filename AS fileName,
+        source_documents.mime_type AS mimeType,
+        source_documents.uploaded_at AS uploadedAt
+      FROM source_documents
+      INNER JOIN intake_jobs
+        ON intake_jobs.source_document_id = source_documents.id
+      WHERE source_documents.id = ?
+        AND intake_jobs.stage IN ('queued', 'extracting', 'needs_review', 'ready')
+      ORDER BY intake_jobs.created_at DESC
+      LIMIT 1
+    `,
+    [sourceDocumentId],
+  )
+}
+
+async function findLatestErrorInvoiceJobForSource(
+  db: D1Database,
+  sourceDocumentId: string,
+) {
+  return firstD1<{ jobId: string }>(
+    db,
+    `
+      /* invoice-upload:find-error-job-by-source */
+      SELECT id AS jobId
+      FROM intake_jobs
+      WHERE source_document_id = ?
+        AND stage = 'error'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `,
+    [sourceDocumentId],
+  )
+}
+
+async function requeueErrorInvoiceJobIfNoActive(input: {
+  env: AppBindings
+  d1: D1Database
+  jobId: string
+  sourceDocumentId: string
+  queuedAt: string
+}) {
+  const provider = selectInvoiceExtractionProvider(input.env)
+  const result = await input.d1
+    .prepare(
+      `
+        /* invoice-upload:requeue-error-job-if-no-active */
+        UPDATE intake_jobs
+        SET stage = 'queued',
+          extractor_provider = ?,
+          extractor_model = ?,
+          confidence_score = NULL,
+          error_message = NULL,
+          updated_at = ?
+        WHERE id = ?
+          AND source_document_id = ?
+          AND stage = 'error'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM intake_jobs
+            WHERE source_document_id = ?
+              AND stage IN ('queued', 'extracting', 'needs_review', 'ready')
+          )
+      `,
+    )
+    .bind(
+      provider.id,
+      provider.model,
+      input.queuedAt,
+      input.jobId,
+      input.sourceDocumentId,
+      input.sourceDocumentId,
+    )
+    .run()
+
+  return (result.meta?.changes ?? 0) === 1
+}
+
+async function resolveReusableSourceDocumentObject(input: {
+  d1: D1Database
+  rawDocumentsBucket: R2Bucket
+  sourceDocument: ExistingInvoiceSourceDocumentRow & { r2Key: string }
+  uploadedR2Key: string | null
+}) {
+  if (await r2ObjectExists(input.rawDocumentsBucket, input.sourceDocument.r2Key)) {
+    return input.sourceDocument
+  }
+
+  if (!input.uploadedR2Key) {
+    return null
+  }
+
+  if (!(await r2ObjectExists(input.rawDocumentsBucket, input.uploadedR2Key))) {
+    return null
+  }
+
+  const result = await input.d1
+    .prepare(
+      `
+        /* invoice-upload:update-source-r2-key */
+        UPDATE source_documents
+        SET r2_key = ?,
+          status = 'uploaded'
+        WHERE id = ?
+      `,
+    )
+    .bind(input.uploadedR2Key, input.sourceDocument.sourceDocumentId)
+    .run()
+
+  if ((result.meta?.changes ?? 0) !== 1) {
+    return null
+  }
+
+  return {
+    ...input.sourceDocument,
+    r2Key: input.uploadedR2Key,
+  }
+}
+
+async function r2ObjectExists(bucket: R2Bucket, r2Key: string) {
+  return (await bucket.head(r2Key)) !== null
 }
 
 async function markQueuedDuplicateRecoveryFailed(input: {
@@ -407,6 +705,6 @@ async function recoverFailedUpload(input: {
   }
 
   if (input.objectStored) {
-    await input.rawDocumentsBucket.delete(input.r2Key)
+    await Promise.allSettled([input.rawDocumentsBucket.delete(input.r2Key)])
   }
 }

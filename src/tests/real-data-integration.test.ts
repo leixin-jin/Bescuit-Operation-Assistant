@@ -293,7 +293,7 @@ describe('invoice upload D1 integration', () => {
     expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(0)
   })
 
-  test('uploading identical file bytes does not reuse an error job and requeues the existing source', async () => {
+  test('uploading identical file bytes reuses an error job when requeueing the existing source', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [
         createSourceDocumentRow({
@@ -330,12 +330,12 @@ describe('invoice upload D1 integration', () => {
 
     expect(result.sourceDocumentId).toBe('src-error-upload')
     expect(result.r2Key).toBe('raw-documents/2026/04/src-error-upload-invoice.pdf')
-    expect(result.jobId).not.toBe('job-error-upload')
+    expect(result.jobId).toBe('job-error-upload')
     expect(tables.source_documents).toHaveLength(1)
     expect(tables.source_documents[0].status).toBe('uploaded')
-    expect(tables.intake_jobs).toHaveLength(2)
-    expect(tables.intake_jobs[0].stage).toBe('error')
-    expect(tables.intake_jobs[1]).toMatchObject({
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-error-upload',
       source_document_id: 'src-error-upload',
       stage: 'queued',
       error_message: null,
@@ -350,6 +350,215 @@ describe('invoice upload D1 integration', () => {
         uploadedAt: '2026-04-27T10:00:00.000Z',
       },
     ])
+  })
+
+  test('uploading identical file bytes reuses the active job when normal job insert loses the source-row race', async () => {
+    const { env, tables } = createFakeD1Env(
+      {},
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (
+            sql.includes('invoice-upload:insert-job-if-no-active') &&
+            currentTables.intake_jobs.length === 0
+          ) {
+            const sourceDocument = currentTables.source_documents[0]
+
+            if (sourceDocument) {
+              currentTables.intake_jobs.push(
+                createIntakeJobRow({
+                  id: 'job-race-winner',
+                  source_document_id: sourceDocument.id,
+                  stage: 'queued',
+                }),
+              )
+            }
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['new-race-invoice-bytes'], 'invoice-race.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result).toEqual({
+      jobId: 'job-race-winner',
+      sourceDocumentId: tables.source_documents[0].id,
+      r2Key: tables.source_documents[0].r2_key,
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(0)
+  })
+
+  test('uploading identical file bytes recovers a duplicate even when cleanup delete fails', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-cleanup-fail',
+          r2_key: 'raw-documents/2026/04/src-cleanup-fail-invoice.pdf',
+          content_hash:
+            '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-cleanup-fail',
+          source_document_id: 'src-cleanup-fail',
+          stage: 'queued',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket(
+      {
+        'raw-documents/2026/04/src-cleanup-fail-invoice.pdf': {
+          body: '1234',
+          contentType: 'application/pdf',
+        },
+      },
+      { failDelete: true },
+    )
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['1234'], 'invoice-cleanup.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result).toEqual({
+      jobId: 'job-cleanup-fail',
+      sourceDocumentId: 'src-cleanup-fail',
+      r2Key: 'raw-documents/2026/04/src-cleanup-fail-invoice.pdf',
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(0)
+  })
+
+  test('uploading identical file bytes heals a missing old R2 object before retrying an error job', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-missing-old-object',
+          r2_key: 'raw-documents/2026/04/src-missing-old-object-invoice.pdf',
+          content_hash:
+            'cbc61c4e48ac37759a3d8e9ac7e0e57b755b97c8dfa7342f58ea1c41348dfaee',
+          status: 'error',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-missing-old-object',
+          source_document_id: 'src-missing-old-object',
+          stage: 'error',
+          error_message: 'R2 object not found',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['missing-old-object-bytes'], 'invoice-retry.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result.jobId).toBe('job-missing-old-object')
+    expect(result.sourceDocumentId).toBe('src-missing-old-object')
+    expect(result.r2Key).not.toBe(
+      'raw-documents/2026/04/src-missing-old-object-invoice.pdf',
+    )
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.source_documents[0]).toMatchObject({
+      id: 'src-missing-old-object',
+      r2_key: result.r2Key,
+      status: 'uploaded',
+    })
+    expect(await env.RAW_DOCUMENTS.head(result.r2Key)).not.toBeNull()
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-missing-old-object',
+      stage: 'queued',
+      error_message: null,
+    })
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toEqual([
+      {
+        jobId: 'job-missing-old-object',
+        sourceDocumentId: 'src-missing-old-object',
+        r2Key: result.r2Key,
+        fileName: 'invoice.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      },
+    ])
+  })
+
+  test('parallel retries of identical error-stage bytes reuse one queued job', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-parallel-error',
+          r2_key: 'raw-documents/2026/04/src-parallel-error-invoice.pdf',
+          content_hash:
+            'd77acb86e3042205b2011e924b32f4b01c930f7fdd2ee2f2ed9899ab0b564d00',
+          status: 'error',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-parallel-error',
+          source_document_id: 'src-parallel-error',
+          stage: 'error',
+          error_message: 'Queue unavailable',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-parallel-error-invoice.pdf': {
+        body: 'parallel-error-bytes',
+        contentType: 'application/pdf',
+      },
+    })
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const [first, second] = await Promise.all([
+      uploadInvoiceSourceDocument({
+        env,
+        file: new File(['parallel-error-bytes'], 'invoice-a.pdf', {
+          type: 'application/pdf',
+        }),
+      }),
+      uploadInvoiceSourceDocument({
+        env,
+        file: new File(['parallel-error-bytes'], 'invoice-b.pdf', {
+          type: 'application/pdf',
+        }),
+      }),
+    ])
+
+    expect(first).toEqual(second)
+    expect(first).toEqual({
+      jobId: 'job-parallel-error',
+      sourceDocumentId: 'src-parallel-error',
+      r2Key: 'raw-documents/2026/04/src-parallel-error-invoice.pdf',
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-parallel-error',
+      stage: 'queued',
+      error_message: null,
+    })
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(1)
   })
 })
 
@@ -1661,6 +1870,52 @@ class FakeD1PreparedStatement {
         }))
     }
 
+    if (sql.includes('invoice-upload:find-active-by-source')) {
+      const [sourceDocumentId] = this.params
+      return this.tables.intake_jobs
+        .filter(
+          (job) =>
+            job.source_document_id === sourceDocumentId &&
+            ['queued', 'extracting', 'needs_review', 'ready'].includes(job.stage),
+        )
+        .map((job) => {
+          const sourceDocument = this.tables.source_documents.find(
+            (row) => row.id === job.source_document_id,
+          )
+
+          return sourceDocument
+            ? {
+                jobId: job.id,
+                sourceDocumentId: sourceDocument.id,
+                r2Key: sourceDocument.r2_key,
+                fileName: sourceDocument.original_filename,
+                mimeType: sourceDocument.mime_type,
+                uploadedAt: sourceDocument.uploaded_at,
+                createdAt: job.created_at,
+              }
+            : null
+        })
+        .filter((row): row is NonNullable<typeof row> => row !== null)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .slice(0, 1)
+        .map(({ createdAt: _createdAt, ...row }) => row)
+    }
+
+    if (sql.includes('invoice-upload:find-error-job-by-source')) {
+      const [sourceDocumentId] = this.params
+      return this.tables.intake_jobs
+        .filter(
+          (job) =>
+            job.source_document_id === sourceDocumentId && job.stage === 'error',
+        )
+        .slice()
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+        .slice(0, 1)
+        .map((job) => ({
+          jobId: job.id,
+        }))
+    }
+
     if (sql.includes('invoice:review-draft-stage')) {
       const [jobId] = this.params
       const job = this.tables.intake_jobs.find((row) => row.id === jobId)
@@ -1808,6 +2063,41 @@ class FakeD1PreparedStatement {
       return 1
     }
 
+    if (sql.includes('invoice-upload:insert-job-if-no-active')) {
+      const [
+        id,
+        sourceDocumentId,
+        extractorProvider,
+        extractorModel,
+        createdAt,
+        updatedAt,
+        guardSourceDocumentId,
+      ] = this.params
+      const hasActiveJob = this.tables.intake_jobs.some(
+        (row) =>
+          row.source_document_id === guardSourceDocumentId &&
+          ['queued', 'extracting', 'needs_review', 'ready'].includes(row.stage),
+      )
+
+      if (hasActiveJob) {
+        return 0
+      }
+
+      this.tables.intake_jobs.push({
+        id: String(id),
+        source_document_id: String(sourceDocumentId),
+        extractor_provider:
+          extractorProvider === null ? null : String(extractorProvider),
+        extractor_model: extractorModel === null ? null : String(extractorModel),
+        stage: 'queued',
+        confidence_score: null,
+        error_message: null,
+        created_at: String(createdAt),
+        updated_at: String(updatedAt),
+      })
+      return 1
+    }
+
     if (sql.includes('insert into "intake_jobs"')) {
       const [
         id,
@@ -1830,6 +2120,46 @@ class FakeD1PreparedStatement {
         created_at: String(createdAt),
         updated_at: String(updatedAt),
       })
+      return 1
+    }
+
+    if (sql.includes('invoice-upload:requeue-error-job-if-no-active')) {
+      const [
+        extractorProvider,
+        extractorModel,
+        updatedAt,
+        jobId,
+        sourceDocumentId,
+        guardSourceDocumentId,
+      ] = this.params
+      const hasActiveJob = this.tables.intake_jobs.some(
+        (row) =>
+          row.source_document_id === guardSourceDocumentId &&
+          ['queued', 'extracting', 'needs_review', 'ready'].includes(row.stage),
+      )
+
+      if (hasActiveJob) {
+        return 0
+      }
+
+      const row = this.tables.intake_jobs.find(
+        (candidate) =>
+          candidate.id === jobId &&
+          candidate.source_document_id === sourceDocumentId &&
+          candidate.stage === 'error',
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.stage = 'queued'
+      row.extractor_provider =
+        extractorProvider === null ? null : String(extractorProvider)
+      row.extractor_model = extractorModel === null ? null : String(extractorModel)
+      row.confidence_score = null
+      row.error_message = null
+      row.updated_at = String(updatedAt)
       return 1
     }
 
@@ -1975,6 +2305,21 @@ class FakeD1PreparedStatement {
         row.extractor_model = String(this.params[2])
         row.confidence_score = Number(this.params[3])
       }
+      return 1
+    }
+
+    if (sql.includes('invoice-upload:update-source-r2-key')) {
+      const [r2Key, sourceDocumentId] = this.params
+      const row = this.tables.source_documents.find(
+        (candidate) => candidate.id === sourceDocumentId,
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.r2_key = String(r2Key)
+      row.status = 'uploaded'
       return 1
     }
 
@@ -2362,10 +2707,25 @@ function createReadyReviewJob(): InvoiceReviewJob {
 
 function createFakeR2Bucket(
   objects: Record<string, { body: string; contentType: string }>,
+  options: { failDelete?: boolean } = {},
 ) {
   const objectMap = new Map(Object.entries(objects))
 
   return {
+    head: async (key: string) => {
+      const object = objectMap.get(key)
+
+      if (!object) {
+        return null
+      }
+
+      return {
+        key,
+        httpMetadata: {
+          contentType: object.contentType,
+        },
+      }
+    },
     get: async (key: string) => {
       const object = objectMap.get(key)
 
@@ -2382,6 +2742,10 @@ function createFakeR2Bucket(
       }
     },
     delete: async (key: string) => {
+      if (options.failDelete) {
+        throw new Error(`R2 delete failed: ${key}`)
+      }
+
       objectMap.delete(key)
     },
     put: async (
