@@ -367,13 +367,13 @@ async function writeConfirmedInvoiceAccounting(
   const db = requireD1Database(env, 'invoice accounting')
   await assertInvoiceReviewDraftWritable(db, job.jobId)
   const sourceDocumentId = await getSourceDocumentId(db, job.jobId)
-  const invoiceId = getInvoiceId(job.jobId)
+  const preferredInvoiceId = getInvoiceId(job.jobId)
   const invoiceDedupeKey = getInvoiceDedupeKey(job)
   const totalAmount = parseCurrencyAmount(job.header.totalAmount)
   const taxAmount = parseCurrencyAmount(job.header.taxAmount)
   const subtotalAmount = roundCurrency(totalAmount - taxAmount)
   const now = new Date().toISOString()
-  const existingInvoiceId = await getSameJobInvoiceId(db, job.jobId, invoiceId)
+  const existingInvoiceId = await getSameJobInvoiceId(db, job.jobId)
   let persistedInvoiceId = existingInvoiceId
 
   if (persistedInvoiceId) {
@@ -394,6 +394,7 @@ async function writeConfirmedInvoiceAccounting(
           review_status = 'ready',
           updated_at = ?
         WHERE id = ?
+          AND intake_job_id = ?
           AND EXISTS (
             SELECT 1
             FROM intake_jobs
@@ -414,6 +415,7 @@ async function writeConfirmedInvoiceAccounting(
         now,
         persistedInvoiceId,
         job.jobId,
+        job.jobId,
       )
       .run()
 
@@ -422,6 +424,11 @@ async function writeConfirmedInvoiceAccounting(
       '发票任务正在删除，不能保存或确认。',
     )
   } else {
+    const invoiceId = await getAvailableInvoiceId(
+      db,
+      preferredInvoiceId,
+      invoiceDedupeKey,
+    )
     const invoiceUpsertResult = await db
       .prepare(
         `/* invoice:upsert-invoice */
@@ -634,24 +641,55 @@ async function getPersistedInvoiceId(db: D1Database, dedupeKey: string) {
   return invoiceId
 }
 
-async function getSameJobInvoiceId(db: D1Database, jobId: string, invoiceId: string) {
+async function getSameJobInvoiceId(db: D1Database, jobId: string) {
   const rows = await allD1<InvoiceIdRow>(
     db,
     `/* invoice:resolve-existing-invoice */
     SELECT id
     FROM invoices
-    WHERE intake_job_id = ? OR id = ?
-    ORDER BY
-      CASE
-        WHEN intake_job_id = ? THEN 0
-        WHEN id = ? THEN 1
-        ELSE 2
-      END
+    WHERE intake_job_id = ?
     LIMIT 1`,
-    [jobId, invoiceId, jobId, invoiceId],
+    [jobId],
   )
 
   return rows[0]?.id ?? null
+}
+
+async function getAvailableInvoiceId(
+  db: D1Database,
+  preferredInvoiceId: string,
+  dedupeKey: string,
+) {
+  const hash = getStableInvoiceKeyHash(dedupeKey)
+
+  for (let suffix = 0; suffix < 20; suffix += 1) {
+    const candidate =
+      suffix === 0
+        ? preferredInvoiceId
+        : suffix === 1
+          ? `${preferredInvoiceId}_${hash}`
+          : `${preferredInvoiceId}_${hash}_${suffix}`
+
+    if (!(await invoiceIdExists(db, candidate))) {
+      return candidate
+    }
+  }
+
+  throw new Error(`Could not allocate invoice id for job invoice ${preferredInvoiceId}`)
+}
+
+async function invoiceIdExists(db: D1Database, invoiceId: string) {
+  const rows = await allD1<InvoiceIdRow>(
+    db,
+    `/* invoice:get-invoice-id */
+    SELECT id
+    FROM invoices
+    WHERE id = ?
+    LIMIT 1`,
+    [invoiceId],
+  )
+
+  return Boolean(rows[0]?.id)
 }
 
 async function assertInvoiceReviewDraftWritable(db: D1Database, jobId: string) {
@@ -697,6 +735,17 @@ function getInvoiceDedupeKey(job: InvoiceReviewJob) {
     job.header.invoiceNo.trim(),
     job.header.date.trim(),
   ].join('|')
+}
+
+function getStableInvoiceKeyHash(value: string) {
+  let hash = 2166136261
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+
+  return (hash >>> 0).toString(36)
 }
 
 function getInvoiceItemId(invoiceId: string, index: number) {
