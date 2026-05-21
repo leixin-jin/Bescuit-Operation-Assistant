@@ -5,7 +5,6 @@ import { processInvoiceIntakeQueueMessage } from '@/lib/server/extraction'
 import { getInvoiceDocumentPreviewResponse } from '@/lib/server/queries/document-preview'
 import {
   isInvoiceIntakeQueueMessage,
-  MAX_QUEUE_CONSUMER_ATTEMPTS,
   QUEUE_RETRY_DELAY_SECONDS,
   type InvoiceIntakeQueueMessage,
 } from '@/lib/server/queue'
@@ -65,11 +64,6 @@ export default {
           attempts: message.attempts,
           error: error instanceof Error ? error.message : 'Unknown queue error',
         })
-
-        if (message.attempts >= MAX_QUEUE_CONSUMER_ATTEMPTS) {
-          message.ack()
-          continue
-        }
 
         message.retry({
           delaySeconds: QUEUE_RETRY_DELAY_SECONDS,

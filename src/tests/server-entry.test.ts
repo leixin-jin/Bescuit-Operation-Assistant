@@ -1,5 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
+import { processInvoiceIntakeQueueMessage } from '@/lib/server/extraction'
 import { getInvoiceDocumentPreviewResponse } from '@/lib/server/queries/document-preview'
+import type { InvoiceIntakeQueueMessage } from '@/lib/server/queue'
 
 vi.mock('@tanstack/react-start/server-entry', () => ({
   default: {
@@ -18,6 +20,16 @@ vi.mock('@/lib/server/extraction', () => ({
 import server from '@/server'
 
 const ctx = {} as ExecutionContext
+
+function createQueueMessage(input: { attempts: number; body: unknown }) {
+  return {
+    id: 'message-1',
+    attempts: input.attempts,
+    body: input.body,
+    ack: vi.fn(),
+    retry: vi.fn(),
+  }
+}
 
 describe('worker entry auth', () => {
   test('rejects production requests without an Authorization header', async () => {
@@ -141,5 +153,36 @@ describe('worker entry auth', () => {
     )
 
     expect(response.status).toBe(200)
+  })
+})
+
+describe('worker queue handling', () => {
+  test('failed valid messages are retried instead of acked at max attempts', async () => {
+    vi.mocked(processInvoiceIntakeQueueMessage).mockRejectedValueOnce(
+      new Error('extractor unavailable'),
+    )
+
+    const message = createQueueMessage({
+      attempts: 3,
+      body: {
+        jobId: 'job-queue-retry',
+        sourceDocumentId: 'source-document-1',
+        r2Key: 'invoice-source/source-document-1.pdf',
+        fileName: 'invoice.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-05-21T10:00:00.000Z',
+      },
+    })
+
+    await server.queue(
+      {
+        queue: 'bescuit-operation-assistant-intake',
+        messages: [message],
+      } as unknown as MessageBatch<InvoiceIntakeQueueMessage>,
+      {} as Env,
+    )
+
+    expect(message.ack).not.toHaveBeenCalled()
+    expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 60 })
   })
 })
