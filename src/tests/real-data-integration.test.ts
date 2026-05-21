@@ -293,6 +293,48 @@ describe('invoice upload D1 integration', () => {
     expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(0)
   })
 
+  test('uploading identical file bytes rejects while the existing intake job is deleting', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-deleting-upload',
+          r2_key: 'raw-documents/2026/04/src-deleting-upload-invoice.pdf',
+          content_hash:
+            '0c8583d7b3069dfdbd0d3e3242580061094ca854eaaf7023ba62e982fd4ef44c',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-deleting-upload',
+          source_document_id: 'src-deleting-upload',
+          stage: 'deleting',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    await expect(
+      uploadInvoiceSourceDocument({
+        env,
+        file: new File(['deleting-invoice-bytes'], 'invoice-deleting.pdf', {
+          type: 'application/pdf',
+        }),
+      }),
+    ).rejects.toThrow(/delet/i)
+
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-deleting-upload',
+      stage: 'deleting',
+    })
+    expect(tables.source_documents[0].r2_key).toBe(
+      'raw-documents/2026/04/src-deleting-upload-invoice.pdf',
+    )
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(0)
+  })
+
   test('uploading identical file bytes reuses an error job when requeueing the existing source', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [
@@ -495,6 +537,56 @@ describe('invoice upload D1 integration', () => {
         jobId: 'job-missing-old-object',
         sourceDocumentId: 'src-missing-old-object',
         r2Key: result.r2Key,
+        fileName: 'invoice.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      },
+    ])
+  })
+
+  test('uploading identical file bytes creates one queued job for an existing source without jobs', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-orphan-upload',
+          r2_key: 'raw-documents/2026/04/src-orphan-upload-invoice.pdf',
+          content_hash:
+            'd6424bee8353574cb308572b94ce9e4c5fcaf48aee323a568631cf1ae2ff2153',
+          status: 'uploaded',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-orphan-upload-invoice.pdf': {
+        body: 'orphan-source-bytes',
+        contentType: 'application/pdf',
+      },
+    })
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['orphan-source-bytes'], 'invoice-orphan.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result).toEqual({
+      jobId: tables.intake_jobs[0]?.id,
+      sourceDocumentId: 'src-orphan-upload',
+      r2Key: 'raw-documents/2026/04/src-orphan-upload-invoice.pdf',
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      source_document_id: 'src-orphan-upload',
+      stage: 'queued',
+    })
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toEqual([
+      {
+        jobId: result.jobId,
+        sourceDocumentId: 'src-orphan-upload',
+        r2Key: 'raw-documents/2026/04/src-orphan-upload-invoice.pdf',
         fileName: 'invoice.pdf',
         mimeType: 'application/pdf',
         uploadedAt: '2026-04-27T10:00:00.000Z',
@@ -1916,6 +2008,21 @@ class FakeD1PreparedStatement {
         }))
     }
 
+    if (sql.includes('invoice-upload:find-deleting-by-source')) {
+      const [sourceDocumentId] = this.params
+      return this.tables.intake_jobs
+        .filter(
+          (job) =>
+            job.source_document_id === sourceDocumentId && job.stage === 'deleting',
+        )
+        .slice()
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+        .slice(0, 1)
+        .map((job) => ({
+          jobId: job.id,
+        }))
+    }
+
     if (sql.includes('invoice:review-draft-stage')) {
       const [jobId] = this.params
       const job = this.tables.intake_jobs.find((row) => row.id === jobId)
@@ -2073,13 +2180,15 @@ class FakeD1PreparedStatement {
         updatedAt,
         guardSourceDocumentId,
       ] = this.params
-      const hasActiveJob = this.tables.intake_jobs.some(
+      const hasBlockingJob = this.tables.intake_jobs.some(
         (row) =>
           row.source_document_id === guardSourceDocumentId &&
-          ['queued', 'extracting', 'needs_review', 'ready'].includes(row.stage),
+          ['queued', 'extracting', 'needs_review', 'ready', 'deleting'].includes(
+            row.stage,
+          ),
       )
 
-      if (hasActiveJob) {
+      if (hasBlockingJob) {
         return 0
       }
 
@@ -2132,13 +2241,15 @@ class FakeD1PreparedStatement {
         sourceDocumentId,
         guardSourceDocumentId,
       ] = this.params
-      const hasActiveJob = this.tables.intake_jobs.some(
+      const hasBlockingJob = this.tables.intake_jobs.some(
         (row) =>
           row.source_document_id === guardSourceDocumentId &&
-          ['queued', 'extracting', 'needs_review', 'ready'].includes(row.stage),
+          ['queued', 'extracting', 'needs_review', 'ready', 'deleting'].includes(
+            row.stage,
+          ),
       )
 
-      if (hasActiveJob) {
+      if (hasBlockingJob) {
         return 0
       }
 

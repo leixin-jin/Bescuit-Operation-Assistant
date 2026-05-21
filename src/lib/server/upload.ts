@@ -93,7 +93,7 @@ export async function uploadInvoiceSourceDocument(input: {
     })
     sourceDocumentStored = true
 
-    const jobInserted = await insertQueuedInvoiceJobIfNoActive({
+    const jobInserted = await insertQueuedInvoiceJobIfNoBlockingJob({
       env: input.env,
       d1,
       jobId,
@@ -112,6 +112,8 @@ export async function uploadInvoiceSourceDocument(input: {
         } satisfies InvoiceUploadResult
       }
 
+      await throwIfDeletingInvoiceJobExists(d1, sourceDocumentId)
+
       throw new Error('Unable to create or recover an invoice intake job.')
     }
 
@@ -126,15 +128,33 @@ export async function uploadInvoiceSourceDocument(input: {
       uploadedAt,
     })
   } catch (error) {
-    const recoveredDuplicate = await recoverDuplicateUploadConflict({
-      env: input.env,
-      db,
-      d1,
-      rawDocumentsBucket,
-      contentHash,
-      uploadedR2Key: objectStored ? r2Key : null,
-      error,
-    })
+    let recoveredDuplicate: InvoiceUploadResult | null = null
+
+    try {
+      recoveredDuplicate = await recoverDuplicateUploadConflict({
+        env: input.env,
+        db,
+        d1,
+        rawDocumentsBucket,
+        contentHash,
+        uploadedR2Key: objectStored ? r2Key : null,
+        error,
+      })
+    } catch (recoveryError) {
+      await recoverFailedUpload({
+        db,
+        rawDocumentsBucket,
+        r2Key,
+        sourceDocumentId,
+        jobId,
+        objectStored,
+        sourceDocumentStored,
+        intakeJobStored,
+        error: recoveryError,
+      })
+
+      throw recoveryError
+    }
 
     if (recoveredDuplicate) {
       if (objectStored && recoveredDuplicate.r2Key !== r2Key) {
@@ -232,6 +252,11 @@ async function recoverDuplicateUploadConflict(input: {
     return null
   }
 
+  await throwIfDeletingInvoiceJobExists(
+    input.d1,
+    existingSourceDocument.sourceDocumentId,
+  )
+
   const sourceDocument = await resolveReusableSourceDocumentObject({
     d1: input.d1,
     rawDocumentsBucket: input.rawDocumentsBucket,
@@ -291,13 +316,19 @@ async function requeueOrCreateInvoiceJobForExistingSource(input: {
 }) {
   const queuedAt = new Date().toISOString()
   const mimeType = input.sourceDocument.mimeType || 'application/octet-stream'
+
+  await throwIfDeletingInvoiceJobExists(
+    input.d1,
+    input.sourceDocument.sourceDocumentId,
+  )
+
   const errorJob = await findLatestErrorInvoiceJobForSource(
     input.d1,
     input.sourceDocument.sourceDocumentId,
   )
 
   if (errorJob) {
-    const claimed = await requeueErrorInvoiceJobIfNoActive({
+    const claimed = await requeueErrorInvoiceJobIfNoBlockingJob({
       env: input.env,
       d1: input.d1,
       jobId: errorJob.jobId,
@@ -327,6 +358,11 @@ async function requeueOrCreateInvoiceJobForExistingSource(input: {
         r2Key: input.sourceDocument.r2Key,
       } satisfies InvoiceUploadResult
     }
+
+    await throwIfDeletingInvoiceJobExists(
+      input.d1,
+      input.sourceDocument.sourceDocumentId,
+    )
   }
 
   const activeJob = await findExistingInvoiceUploadForSource(
@@ -343,7 +379,7 @@ async function requeueOrCreateInvoiceJobForExistingSource(input: {
   }
 
   const jobId = `job_${crypto.randomUUID()}`
-  const jobInserted = await insertQueuedInvoiceJobIfNoActive({
+  const jobInserted = await insertQueuedInvoiceJobIfNoBlockingJob({
     env: input.env,
     d1: input.d1,
     jobId,
@@ -364,6 +400,11 @@ async function requeueOrCreateInvoiceJobForExistingSource(input: {
         r2Key: existingJob.r2Key,
       } satisfies InvoiceUploadResult
     }
+
+    await throwIfDeletingInvoiceJobExists(
+      input.d1,
+      input.sourceDocument.sourceDocumentId,
+    )
 
     return null
   }
@@ -418,7 +459,7 @@ async function enqueueClaimedInvoiceJob(input: {
   }
 }
 
-async function insertQueuedInvoiceJobIfNoActive(input: {
+async function insertQueuedInvoiceJobIfNoBlockingJob(input: {
   env: AppBindings
   d1: D1Database
   jobId: string
@@ -429,7 +470,7 @@ async function insertQueuedInvoiceJobIfNoActive(input: {
   const result = await input.d1
     .prepare(
       `
-        /* invoice-upload:insert-job-if-no-active */
+        /* invoice-upload:insert-job-if-no-active invoice-upload:insert-job-if-no-blocking */
         INSERT INTO intake_jobs (
           id,
           source_document_id,
@@ -444,7 +485,7 @@ async function insertQueuedInvoiceJobIfNoActive(input: {
           SELECT 1
           FROM intake_jobs
           WHERE source_document_id = ?
-            AND stage IN ('queued', 'extracting', 'needs_review', 'ready')
+            AND stage IN ('queued', 'extracting', 'needs_review', 'ready', 'deleting')
         )
       `,
     )
@@ -507,7 +548,7 @@ async function findLatestErrorInvoiceJobForSource(
   )
 }
 
-async function requeueErrorInvoiceJobIfNoActive(input: {
+async function requeueErrorInvoiceJobIfNoBlockingJob(input: {
   env: AppBindings
   d1: D1Database
   jobId: string
@@ -518,7 +559,7 @@ async function requeueErrorInvoiceJobIfNoActive(input: {
   const result = await input.d1
     .prepare(
       `
-        /* invoice-upload:requeue-error-job-if-no-active */
+        /* invoice-upload:requeue-error-job-if-no-active invoice-upload:requeue-error-job-if-no-blocking */
         UPDATE intake_jobs
         SET stage = 'queued',
           extractor_provider = ?,
@@ -533,7 +574,7 @@ async function requeueErrorInvoiceJobIfNoActive(input: {
             SELECT 1
             FROM intake_jobs
             WHERE source_document_id = ?
-              AND stage IN ('queued', 'extracting', 'needs_review', 'ready')
+              AND stage IN ('queued', 'extracting', 'needs_review', 'ready', 'deleting')
           )
       `,
     )
@@ -548,6 +589,31 @@ async function requeueErrorInvoiceJobIfNoActive(input: {
     .run()
 
   return (result.meta?.changes ?? 0) === 1
+}
+
+async function throwIfDeletingInvoiceJobExists(
+  db: D1Database,
+  sourceDocumentId: string,
+) {
+  const deletingJob = await firstD1<{ jobId: string }>(
+    db,
+    `
+      /* invoice-upload:find-deleting-by-source */
+      SELECT id AS jobId
+      FROM intake_jobs
+      WHERE source_document_id = ?
+        AND stage = 'deleting'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `,
+    [sourceDocumentId],
+  )
+
+  if (deletingJob) {
+    throw new Error(
+      'This invoice upload is currently being deleted. Upload it again after deletion finishes.',
+    )
+  }
 }
 
 async function resolveReusableSourceDocumentObject(input: {
