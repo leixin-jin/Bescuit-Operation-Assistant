@@ -1024,6 +1024,146 @@ describe('invoice review D1 integration', () => {
     expect(tables.ledger_entries[0]?.source_id).toBe(tables.invoices[0]?.id)
   })
 
+  test('reconfirming same job into an existing dedupe invoice merges accounting into the target invoice', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-a',
+          original_filename: 'invoice-a.pdf',
+        }),
+        createSourceDocumentRow({
+          id: 'src-b',
+          original_filename: 'invoice-b.pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-a',
+          source_document_id: 'src-a',
+          stage: 'needs_review',
+        }),
+        createIntakeJobRow({
+          id: 'job-b',
+          source_document_id: 'src-b',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        createExtractionResultRow({
+          id: 'ext-job-a',
+          intake_job_id: 'job-a',
+        }),
+        createExtractionResultRow({
+          id: 'ext-job-b',
+          intake_job_id: 'job-b',
+        }),
+      ],
+    })
+    const firstJob = createReadyReviewJob({ jobId: 'job-a', fileName: 'invoice-a.pdf' })
+    const secondJob = createReadyReviewJob({
+      jobId: 'job-b',
+      fileName: 'invoice-b.pdf',
+      header: {
+        supplier: 'Makro Alcala',
+        invoiceNo: 'MK-002',
+        date: '2026-04-21',
+        totalAmount: '242.00',
+        taxAmount: '42.00',
+      },
+      lineItems: [
+        {
+          id: 'line-b',
+          name: 'Sprite 330ml',
+          qty: '5',
+          unit: 'can',
+          unitPrice: '20.00',
+          lineTotal: '100.00',
+          taxRate: '21%',
+          notes: '',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+    })
+    const correctedFirstJob = createReadyReviewJob({
+      jobId: 'job-a',
+      fileName: 'invoice-a.pdf',
+      header: {
+        supplier: 'Makro Alcala',
+        invoiceNo: 'MK-002',
+        date: '2026-04-21',
+        totalAmount: '363.00',
+        taxAmount: '63.00',
+      },
+      lineItems: [
+        {
+          id: 'line-a-corrected',
+          name: 'Fanta 330ml',
+          qty: '30',
+          unit: 'can',
+          unitPrice: '10.00',
+          lineTotal: '300.00',
+          taxRate: '21%',
+          notes: '',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+    })
+
+    await expect(confirmInvoiceReviewJobInDatabase(env, firstJob)).resolves.toMatchObject({
+      ok: true,
+    })
+    const oldInvoiceId = tables.invoices[0]?.id
+
+    await expect(confirmInvoiceReviewJobInDatabase(env, secondJob)).resolves.toMatchObject({
+      ok: true,
+    })
+    const targetInvoiceId = tables.invoices.find(
+      (invoice) => invoice.dedupe_key === 'makro alcala|MK-002|2026-04-21',
+    )?.id
+
+    await expect(
+      confirmInvoiceReviewJobInDatabase(env, correctedFirstJob),
+    ).resolves.toMatchObject({
+      ok: true,
+    })
+
+    expect(tables.invoices).toHaveLength(1)
+    expect(tables.invoices[0]).toMatchObject({
+      id: targetInvoiceId,
+      intake_job_id: 'job-a',
+      source_document_id: 'src-a',
+      supplier_name: 'Makro Alcala',
+      document_number: 'MK-002',
+      invoice_date: '2026-04-21',
+      total_amount: 363,
+      tax_amount: 63,
+      dedupe_key: 'makro alcala|MK-002|2026-04-21',
+    })
+    expect(tables.invoices.some((invoice) => invoice.id === oldInvoiceId)).toBe(false)
+    expect(tables.invoice_items).toHaveLength(1)
+    expect(tables.invoice_items[0]).toMatchObject({
+      invoice_id: targetInvoiceId,
+      raw_product_name: 'Fanta 330ml',
+      raw_quantity: 30,
+    })
+    expect(tables.invoice_items.some((item) => item.invoice_id === oldInvoiceId)).toBe(
+      false,
+    )
+    expect(tables.ledger_entries).toHaveLength(1)
+    expect(tables.ledger_entries[0]).toMatchObject({
+      id: `ledger_${targetInvoiceId}`,
+      entry_date: '2026-04-21',
+      amount: 363,
+      vendor: 'Makro Alcala',
+      source_id: targetInvoiceId,
+    })
+    expect(
+      tables.ledger_entries.some((entry) => entry.source_id === oldInvoiceId),
+    ).toBe(false)
+  })
+
   test('reconfirming the original duplicate job with a changed invoice keeps the shared duplicate invoice intact', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [
@@ -2939,6 +3079,113 @@ class FakeD1PreparedStatement {
         (row) => row.id !== sourceDocumentId,
       )
       return beforeCount - this.tables.source_documents.length
+    }
+
+    if (sql.includes('invoice:delete-retired-ledger')) {
+      const [invoiceId, jobId] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage === 'ready',
+      )
+
+      if (!job) {
+        return 0
+      }
+
+      const beforeCount = this.tables.ledger_entries.length
+      this.tables.ledger_entries = this.tables.ledger_entries.filter(
+        (row) => row.source_kind !== 'invoice' || row.source_id !== invoiceId,
+      )
+      return beforeCount - this.tables.ledger_entries.length
+    }
+
+    if (sql.includes('invoice:delete-retired-items')) {
+      const [invoiceId, jobId] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage === 'ready',
+      )
+
+      if (!job) {
+        return 0
+      }
+
+      const beforeCount = this.tables.invoice_items.length
+      this.tables.invoice_items = this.tables.invoice_items.filter(
+        (row) => row.invoice_id !== invoiceId,
+      )
+      return beforeCount - this.tables.invoice_items.length
+    }
+
+    if (sql.includes('invoice:delete-retired-invoice')) {
+      const [invoiceId, intakeJobId, guardJobId] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === guardJobId && candidate.stage === 'ready',
+      )
+
+      if (!job) {
+        return 0
+      }
+
+      const beforeCount = this.tables.invoices.length
+      this.tables.invoices = this.tables.invoices.filter(
+        (row) => row.id !== invoiceId || row.intake_job_id !== intakeJobId,
+      )
+      return beforeCount - this.tables.invoices.length
+    }
+
+    if (sql.includes('invoice:merge-into-existing-dedupe')) {
+      const [
+        intakeJobId,
+        invoiceDate,
+        supplierName,
+        documentNumber,
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+        sourceDocumentId,
+        dedupeKey,
+        now,
+        id,
+        guardJobId,
+      ] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === guardJobId && candidate.stage === 'ready',
+      )
+      const existingRow = this.tables.invoices.find((row) => row.id === id)
+
+      if (!job || !existingRow) {
+        return 0
+      }
+
+      if (
+        this.tables.invoices.some(
+          (row) => row.id !== existingRow.id && row.dedupe_key === dedupeKey,
+        )
+      ) {
+        throw new Error('UNIQUE constraint failed: invoices.dedupe_key')
+      }
+
+      if (
+        this.tables.invoices.some(
+          (row) => row.id !== existingRow.id && row.intake_job_id === intakeJobId,
+        )
+      ) {
+        throw new Error('UNIQUE constraint failed: invoices.intake_job_id')
+      }
+
+      Object.assign(existingRow, {
+        intake_job_id: String(intakeJobId),
+        dedupe_key: String(dedupeKey),
+        invoice_date: String(invoiceDate),
+        supplier_name: String(supplierName),
+        document_number: String(documentNumber),
+        subtotal_amount: toNullableNumber(subtotalAmount),
+        tax_amount: Number(taxAmount),
+        total_amount: Number(totalAmount),
+        source_document_id: String(sourceDocumentId),
+        review_status: 'ready',
+        updated_at: String(now),
+      })
+      return 1
     }
 
     if (sql.includes('invoice:update-existing-invoice')) {

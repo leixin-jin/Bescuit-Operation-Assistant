@@ -377,9 +377,38 @@ async function writeConfirmedInvoiceAccounting(
   let persistedInvoiceId = existingInvoiceId
 
   if (persistedInvoiceId) {
+    const targetInvoiceId = await getInvoiceIdByDedupeKey(db, invoiceDedupeKey)
+
+    if (targetInvoiceId && targetInvoiceId !== persistedInvoiceId) {
+      await deleteRetiredInvoiceAccounting(db, job.jobId, persistedInvoiceId)
+      persistedInvoiceId = targetInvoiceId
+    }
+
     const invoiceUpdateResult = await db
       .prepare(
-        `/* invoice:update-existing-invoice */
+        targetInvoiceId && targetInvoiceId === persistedInvoiceId
+          ? `/* invoice:merge-into-existing-dedupe */
+        UPDATE invoices
+        SET
+          intake_job_id = ?,
+          invoice_date = ?,
+          supplier_name = ?,
+          document_number = ?,
+          subtotal_amount = ?,
+          tax_amount = ?,
+          total_amount = ?,
+          source_document_id = ?,
+          dedupe_key = ?,
+          review_status = 'ready',
+          updated_at = ?
+        WHERE id = ?
+          AND EXISTS (
+            SELECT 1
+            FROM intake_jobs
+            WHERE intake_jobs.id = ?
+              AND intake_jobs.stage = 'ready'
+          )`
+          : `/* invoice:update-existing-invoice */
         UPDATE invoices
         SET
           intake_job_id = ?,
@@ -414,8 +443,9 @@ async function writeConfirmedInvoiceAccounting(
         invoiceDedupeKey,
         now,
         persistedInvoiceId,
-        job.jobId,
-        job.jobId,
+        ...(targetInvoiceId && targetInvoiceId === persistedInvoiceId
+          ? [job.jobId]
+          : [job.jobId, job.jobId]),
       )
       .run()
 
@@ -623,6 +653,16 @@ async function getSourceDocumentId(db: D1Database, jobId: string) {
 }
 
 async function getPersistedInvoiceId(db: D1Database, dedupeKey: string) {
+  const invoiceId = await getInvoiceIdByDedupeKey(db, dedupeKey)
+
+  if (!invoiceId) {
+    throw new Error(`Confirmed invoice was not persisted: ${dedupeKey}`)
+  }
+
+  return invoiceId
+}
+
+async function getInvoiceIdByDedupeKey(db: D1Database, dedupeKey: string) {
   const rows = await allD1<InvoiceIdRow>(
     db,
     `/* invoice:get-persisted-invoice-id */
@@ -634,11 +674,7 @@ async function getPersistedInvoiceId(db: D1Database, dedupeKey: string) {
   )
   const invoiceId = rows[0]?.id
 
-  if (!invoiceId) {
-    throw new Error(`Confirmed invoice was not persisted: ${dedupeKey}`)
-  }
-
-  return invoiceId
+  return invoiceId ?? null
 }
 
 async function getSameJobInvoiceId(db: D1Database, jobId: string) {
@@ -653,6 +689,64 @@ async function getSameJobInvoiceId(db: D1Database, jobId: string) {
   )
 
   return rows[0]?.id ?? null
+}
+
+async function deleteRetiredInvoiceAccounting(
+  db: D1Database,
+  jobId: string,
+  invoiceId: string,
+) {
+  await db
+    .prepare(
+      `/* invoice:delete-retired-ledger */
+      DELETE FROM ledger_entries
+      WHERE source_kind = 'invoice'
+        AND source_id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'ready'
+        )`,
+    )
+    .bind(invoiceId, jobId)
+    .run()
+
+  await db
+    .prepare(
+      `/* invoice:delete-retired-items */
+      DELETE FROM invoice_items
+      WHERE invoice_id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'ready'
+        )`,
+    )
+    .bind(invoiceId, jobId)
+    .run()
+
+  const invoiceDeleteResult = await db
+    .prepare(
+      `/* invoice:delete-retired-invoice */
+      DELETE FROM invoices
+      WHERE id = ?
+        AND intake_job_id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'ready'
+        )`,
+    )
+    .bind(invoiceId, jobId, jobId)
+    .run()
+
+  assertInvoiceMutationChanged(
+    invoiceDeleteResult,
+    '发票任务正在删除，不能保存或确认。',
+  )
 }
 
 async function getAvailableInvoiceId(
