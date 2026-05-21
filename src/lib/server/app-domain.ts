@@ -281,7 +281,7 @@ export function getInvoiceReadinessSummary(
   job: Pick<InvoiceReviewJob, 'header' | 'lineItems'>,
 ): InvoiceReadinessSummary {
   const missingHeaderFields = getMissingRequiredHeaderFields(job.header)
-  const invalidHeaderFields = getInvalidHeaderFields(job.header)
+  const invalidHeaderFields = getInvalidHeaderFields(job)
 
   return {
     isReady: missingHeaderFields.length === 0 && invalidHeaderFields.length === 0,
@@ -338,10 +338,18 @@ function getMissingRequiredHeaderFields(header: InvoiceHeaderDraft) {
     .map(([, label]) => label)
 }
 
-function getInvalidHeaderFields(header: InvoiceHeaderDraft) {
+function getInvalidHeaderFields(job: Pick<InvoiceReviewJob, 'header' | 'lineItems'>) {
+  const { header } = job
   const invalidFields: string[] = []
 
-  if (header.totalAmount.trim() !== '' && !isInvoiceAmount(header.totalAmount)) {
+  if (header.date.trim() !== '' && !isIsoDateInput(header.date)) {
+    invalidFields.push('发票日期')
+  }
+
+  if (
+    header.totalAmount.trim() !== '' &&
+    !isPositiveInvoiceAmount(header.totalAmount)
+  ) {
     invalidFields.push('总金额')
   }
 
@@ -349,12 +357,57 @@ function getInvalidHeaderFields(header: InvoiceHeaderDraft) {
     invalidFields.push('税额')
   }
 
+  if (
+    isInvoiceAmount(header.totalAmount) &&
+    isInvoiceAmount(header.taxAmount) &&
+    parseCurrencyAmount(header.taxAmount) > parseCurrencyAmount(header.totalAmount)
+  ) {
+    invalidFields.push('税额不能大于总金额')
+  }
+
+  if (hasInvalidLineItemAmount(job.lineItems)) {
+    invalidFields.push('明细金额')
+  }
+
   return invalidFields
+}
+
+function isPositiveInvoiceAmount(value: string) {
+  return isInvoiceAmount(value) && parseCurrencyAmount(value) > 0
 }
 
 function isInvoiceAmount(value: string) {
   const normalizedValue = value.trim().replace(',', '.')
   return /^\d+(?:\.\d{1,2})?$/.test(normalizedValue)
+}
+
+function isIsoDateInput(value: string) {
+  const trimmedValue = value.trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmedValue)) {
+    return false
+  }
+
+  const [year, month, day] = trimmedValue.split('-').map(Number)
+  const parsedDate = new Date(Date.UTC(year, month - 1, day))
+
+  return (
+    parsedDate.getUTCFullYear() === year &&
+    parsedDate.getUTCMonth() === month - 1 &&
+    parsedDate.getUTCDate() === day
+  )
+}
+
+function hasInvalidLineItemAmount(lineItems: InvoiceLineItemDraft[]) {
+  return lineItems.some(
+    (item) =>
+      isInvalidOptionalPositiveAmount(item.qty) ||
+      isInvalidOptionalPositiveAmount(item.unitPrice) ||
+      isInvalidOptionalPositiveAmount(item.lineTotal ?? ''),
+  )
+}
+
+function isInvalidOptionalPositiveAmount(value: string) {
+  return value.trim() !== '' && !isPositiveInvoiceAmount(value)
 }
 
 function typedEntries<T extends Record<string, string>>(record: T) {
