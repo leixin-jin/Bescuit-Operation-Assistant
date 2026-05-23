@@ -67,6 +67,10 @@ wrangler secret put APP_BASIC_AUTH_PASSWORD
 
 Queue 抽取流程直接把 R2 中的 PDF/图片 bytes 传给 provider，并校验 `invoice-extraction-v2` JSON schema；不会再调用 Workers AI `toMarkdown()` 作为生产抽取路径。
 
+### Duplicate Invoice Behavior
+
+Uploading the same file bytes reuses the existing invoice intake job and does not enqueue another extraction job. Confirming two jobs with the same supplier, document number, and invoice date updates the same invoice, invoice items, and ledger entry instead of double-counting expenses.
+
 已创建的资源：
 
 - D1 database: `bescuit-operation-assistant-db`
@@ -78,7 +82,9 @@ Queue 抽取流程直接把 R2 中的 PDF/图片 bytes 传给 provider，并校�
 首次部署前执行远程 D1 schema 初始化：
 
 ```bash
-pnpm cf:migrate:remote
+wrangler d1 execute bescuit-operation-assistant-db --remote --file migrations/0001_initial.sql
+wrangler d1 execute bescuit-operation-assistant-db --remote --file migrations/0002_real_data_constraints_and_ingredients.sql
+wrangler d1 execute bescuit-operation-assistant-db --remote --file migrations/0003_invoice_idempotency_and_auth.sql
 ```
 
 ## 部署
@@ -91,7 +97,7 @@ pnpm deploy
 
 - `wrangler.jsonc` 的 D1 `database_id` 是真实 ID。
 - R2 已启用并创建 `bescuit-operation-assistant-raw-documents`。
-- D1 已执行 `migrations/0001_initial.sql`。
+- D1 已按顺序执行 `migrations/0001_initial.sql`、`migrations/0002_real_data_constraints_and_ingredients.sql`、`migrations/0003_invoice_idempotency_and_auth.sql`。
 - Queue 与 DLQ 已创建并与 `wrangler.jsonc` 中的名称一致。
 
 ## 原型目录
