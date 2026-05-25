@@ -21,10 +21,12 @@ import {
 } from '@/lib/server/app-domain'
 import {
   confirmInvoiceReviewJob,
+  recheckInvoiceReviewJob,
   saveInvoiceReviewJob,
 } from '@/lib/server/mutations/invoices'
 import {
   confirmInvoiceReviewJobServerFn,
+  recheckInvoiceReviewJobServerFn,
   saveInvoiceReviewJobServerFn,
 } from '@/lib/server/mutations/invoices.rpc'
 import {
@@ -171,6 +173,38 @@ function InvoiceReviewWorkbenchPage() {
       setFeedbackMessage(
         error instanceof Error ? error.message : '保存发票 review 失败。',
       )
+    },
+  })
+  const recheckReviewMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeJob) {
+        throw new Error('Invoice review job is missing.')
+      }
+
+      const recheckedJob = pipelineEnabled
+        ? await recheckInvoiceReviewJobServerFn({ data: { jobId: activeJob.jobId } })
+        : await recheckInvoiceReviewJob(activeJob.jobId)
+
+      if (!recheckedJob) {
+        throw new Error('重新核对后未找到发票任务。')
+      }
+
+      return recheckedJob
+    },
+    onSuccess: async (job) => {
+      form.reset(createInvoiceReviewFormValues(job))
+      setFeedbackMessage('已重新读取发票内容，请核对新的抽取结果。')
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['invoice-review', jobId] }),
+        queryClient.invalidateQueries({ queryKey: ['invoice-jobs'] }),
+        queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] }),
+        queryClient.invalidateQueries({ queryKey: ['monthly-analytics'] }),
+        queryClient.invalidateQueries({ queryKey: ['calendar-analytics'] }),
+        router.invalidate(),
+      ])
+    },
+    onError: (error) => {
+      setFeedbackMessage(formatRecheckErrorMessage(error))
     },
   })
 
@@ -347,12 +381,23 @@ function InvoiceReviewWorkbenchPage() {
                     <div className="flex-1 space-y-6 overflow-auto p-6">
                       <ReviewHeaderForm
                         header={editableJob.header}
-                        disabled={isPipelineJobProcessing}
+                        disabled={
+                          isPipelineJobProcessing || recheckReviewMutation.isPending
+                        }
+                        recheckDisabled={
+                          persistReviewMutation.isPending ||
+                          recheckReviewMutation.isPending ||
+                          isPipelineJobProcessing
+                        }
+                        recheckPending={recheckReviewMutation.isPending}
+                        onRecheck={() => recheckReviewMutation.mutate()}
                         onFieldChange={handleHeaderFieldChange}
                       />
                       <ReviewTable
                         lineItems={editableJob.lineItems}
-                        disabled={isPipelineJobProcessing}
+                        disabled={
+                          isPipelineJobProcessing || recheckReviewMutation.isPending
+                        }
                         onQuantityChange={(itemId, value) => {
                           if (isDecimalInput(value)) {
                             handleLineItemFieldChange(itemId, value, 'qty')
@@ -420,7 +465,9 @@ function InvoiceReviewWorkbenchPage() {
                           variant="secondary"
                           className="flex-1 rounded-lg"
                           disabled={
-                            persistReviewMutation.isPending || isPipelineJobProcessing
+                            persistReviewMutation.isPending ||
+                            recheckReviewMutation.isPending ||
+                            isPipelineJobProcessing
                           }
                           onClick={() => void form.handleSubmit({ mode: 'draft' })}
                         >
@@ -433,6 +480,7 @@ function InvoiceReviewWorkbenchPage() {
                           disabled={
                             !readinessSummary.isReady ||
                             persistReviewMutation.isPending ||
+                            recheckReviewMutation.isPending ||
                             isPipelineJobProcessing
                           }
                         >
@@ -494,4 +542,12 @@ function mergeReviewFormValues(
 
 function isDecimalInput(value: string) {
   return value === '' || /^\d*\.?\d*$/.test(value)
+}
+
+function formatRecheckErrorMessage(error: unknown) {
+  if (error instanceof Error && /failed to fetch/i.test(error.message)) {
+    return '重新核对请求失败，请确认服务正在运行并刷新页面后重试。'
+  }
+
+  return error instanceof Error ? error.message : '重新核对发票失败。'
 }

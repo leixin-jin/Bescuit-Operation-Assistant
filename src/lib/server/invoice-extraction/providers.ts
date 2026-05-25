@@ -23,7 +23,7 @@ export function selectInvoiceExtractionProvider(
   const providerId = normalizeProviderId(env?.INVOICE_EXTRACTION_PROVIDER)
   const model =
     env?.INVOICE_EXTRACTION_MODEL?.trim() ||
-    (providerId === 'gemini' ? 'gemini-3.1-flash-lite' : 'filename-fallback-v1')
+    (providerId === 'gemini' ? 'gemini-3.5-flash' : 'filename-fallback-v1')
 
   if (providerId === 'gemini') {
     if (!env?.GEMINI_API_KEY?.trim()) {

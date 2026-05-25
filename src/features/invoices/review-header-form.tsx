@@ -1,3 +1,6 @@
+import { RefreshCw } from 'lucide-react'
+
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -7,18 +10,39 @@ import type { InvoiceHeaderDraft } from '@/lib/server/app-domain'
 interface ReviewHeaderFormProps {
   header: InvoiceHeaderDraft
   disabled?: boolean
+  recheckDisabled?: boolean
+  recheckPending?: boolean
+  onRecheck?: () => void
   onFieldChange: (field: keyof InvoiceHeaderDraft, value: string) => void
 }
 
 export function ReviewHeaderForm({
   header,
   disabled = false,
+  recheckDisabled = false,
+  recheckPending = false,
+  onRecheck,
   onFieldChange,
 }: ReviewHeaderFormProps) {
   return (
     <Card className="rounded-xl">
-      <CardHeader className="pb-4">
+      <CardHeader className="flex flex-row items-center justify-between gap-3 pb-4">
         <CardTitle className="text-base">发票信息</CardTitle>
+        {onRecheck ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="rounded-lg"
+            disabled={recheckDisabled}
+            onClick={onRecheck}
+          >
+            <RefreshCw
+              className={`mr-2 h-4 w-4 ${recheckPending ? 'animate-spin' : ''}`}
+            />
+            {recheckPending ? '重新核对中' : '重新核对'}
+          </Button>
+        ) : null}
       </CardHeader>
       <CardContent className="grid gap-4">
         <div className="grid gap-4 sm:grid-cols-2">

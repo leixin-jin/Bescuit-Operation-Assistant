@@ -84,6 +84,80 @@ vi.mock('@/lib/server/queries/invoices', async () => {
         }
       }
 
+      if (jobId === 'recheck-review-job') {
+        const recheckCalls = (
+          globalThis as typeof globalThis & { __invoiceRecheckCalls?: number }
+        ).__invoiceRecheckCalls ?? 0
+
+        return {
+          job: {
+            jobId,
+            fileName: 'recheck-review.pdf',
+            uploadedAt: '2026-04-24T11:00:00.000Z',
+            pageCount: 1,
+            status: 'needs_review' as const,
+            stage: 'needs_review' as const,
+            errorMessage: null,
+            header: {
+              supplier: recheckCalls > 0 ? 'Fresh Supplier' : 'Old Supplier',
+              invoiceNo: recheckCalls > 0 ? 'INV-FRESH' : 'INV-OLD',
+              date: '2026-04-24',
+              totalAmount: '99.90',
+              taxAmount: '9.99',
+              notes: '',
+            },
+            lineItems: [
+              {
+                id: 'line-recheck-1',
+                name: '柠檬',
+                qty: '3',
+                unit: 'kg',
+                unitPrice: '25.61',
+                lineTotal: '76.83',
+                ingredient: '',
+                matched: false,
+              },
+            ],
+          },
+          ingredientOptions: actual.ingredientOptions,
+        }
+      }
+
+      if (jobId === 'recheck-network-error-job') {
+        return {
+          job: {
+            jobId,
+            fileName: 'recheck-network-error.pdf',
+            uploadedAt: '2026-04-24T11:00:00.000Z',
+            pageCount: 1,
+            status: 'needs_review' as const,
+            stage: 'needs_review' as const,
+            errorMessage: null,
+            header: {
+              supplier: 'Old Supplier',
+              invoiceNo: 'INV-OLD',
+              date: '2026-04-24',
+              totalAmount: '99.90',
+              taxAmount: '9.99',
+              notes: '',
+            },
+            lineItems: [
+              {
+                id: 'line-network-error-1',
+                name: '柠檬',
+                qty: '3',
+                unit: 'kg',
+                unitPrice: '25.61',
+                ingredient: '',
+                matched: false,
+              },
+            ],
+          },
+          ingredientOptions: actual.ingredientOptions,
+        }
+      }
+
+
       return {
         job: {
           jobId,
@@ -120,7 +194,59 @@ vi.mock('@/lib/server/queries/invoices', async () => {
   }
 })
 
+vi.mock('@/lib/server/mutations/invoices', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/server/mutations/invoices')>(
+    '@/lib/server/mutations/invoices',
+  )
+
+  return {
+    ...actual,
+    recheckInvoiceReviewJob: vi.fn(async (jobId: string) => {
+      if (jobId === 'recheck-network-error-job') {
+        throw new Error('Failed to fetch')
+      }
+
+      ;(
+        globalThis as typeof globalThis & { __invoiceRecheckCalls?: number }
+      ).__invoiceRecheckCalls =
+        ((globalThis as typeof globalThis & { __invoiceRecheckCalls?: number })
+          .__invoiceRecheckCalls ?? 0) + 1
+
+      const { getInvoiceReviewPageData } = await import('@/lib/server/queries/invoices')
+      const pageData = await getInvoiceReviewPageData(jobId)
+      return pageData.job
+    }),
+  }
+})
+
+vi.mock('@/lib/server/mutations/invoices.rpc', async () => {
+  const actual = await vi.importActual<
+    typeof import('@/lib/server/mutations/invoices.rpc')
+  >('@/lib/server/mutations/invoices.rpc')
+
+  return {
+    ...actual,
+    recheckInvoiceReviewJobServerFn: vi.fn(async ({ data }: { data: { jobId: string } }) => {
+      if (data.jobId === 'recheck-network-error-job') {
+        throw new Error('Failed to fetch')
+      }
+
+      ;(
+        globalThis as typeof globalThis & { __invoiceRecheckCalls?: number }
+      ).__invoiceRecheckCalls =
+        ((globalThis as typeof globalThis & { __invoiceRecheckCalls?: number })
+          .__invoiceRecheckCalls ?? 0) + 1
+
+      const { getInvoiceReviewPageData } = await import('@/lib/server/queries/invoices')
+      const pageData = await getInvoiceReviewPageData(data.jobId)
+      return pageData.job
+    }),
+  }
+})
+
 afterEach(() => {
+  delete (globalThis as typeof globalThis & { __invoiceRecheckCalls?: number })
+    .__invoiceRecheckCalls
   cleanup()
 })
 
@@ -197,5 +323,35 @@ describe('invoice review route hydration', () => {
 
     expect(screen.queryByText('€102.45')).not.toBeInTheDocument()
     expect(screen.getByText('€90.00')).toBeInTheDocument()
+  })
+
+  test('recheck button reruns invoice extraction and refreshes the review draft', async () => {
+    await renderRoute('/invoices/review/recheck-review-job')
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('Old Supplier')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /重新核对/ }))
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('Fresh Supplier')).toBeInTheDocument()
+    })
+    expect(screen.getByDisplayValue('INV-FRESH')).toBeInTheDocument()
+  })
+
+  test('shows a localized retry hint when the recheck request cannot reach the server', async () => {
+    await renderRoute('/invoices/review/recheck-network-error-job')
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('Old Supplier')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /重新核对/ }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/重新核对请求失败/)).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Failed to fetch')).not.toBeInTheDocument()
   })
 })
