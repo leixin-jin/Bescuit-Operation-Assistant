@@ -685,7 +685,7 @@ function inferUnit(cells: string[]) {
   )
 }
 
-function calculateDraftConfidence(draft: InvoiceExtractionDraft) {
+export function calculateDraftConfidence(draft: InvoiceExtractionDraft) {
   if (typeof draft.confidence?.overall === 'number') {
     return Math.max(0, Math.min(1, Number(draft.confidence.overall.toFixed(2))))
   }

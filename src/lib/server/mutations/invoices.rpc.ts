@@ -12,9 +12,13 @@ import {
   type InvoiceReviewJob,
 } from '@/lib/server/app-domain'
 import {
+  buildInvoiceProviderInput,
+  calculateDraftConfidence,
   INVOICE_EXTRACTION_SCHEMA_VERSION,
+  getExtractionResultId,
   mapIntakeStageToInvoiceStatus,
   parseStoredExtractionDraft,
+  selectInvoiceExtractionProvider,
   serializeExtractionDraft,
   type InvoiceExtractionDraft,
 } from '@/lib/server/extraction'
@@ -28,6 +32,16 @@ interface LatestExtractionRow {
 
 interface IntakeSourceRow {
   sourceDocumentId: string
+}
+
+interface RecheckSourceRow {
+  jobId: string
+  stage: string
+  sourceDocumentId: string
+  r2Key: string | null
+  fileName: string
+  mimeType: string | null
+  uploadedAt: string
 }
 
 interface IntakeStageRow {
@@ -92,6 +106,18 @@ export const confirmInvoiceReviewJobServerFn = createServerFn({ method: 'POST' }
   .inputValidator((data: { job: InvoiceReviewJob }) => data)
   .handler(async ({ data, context }) =>
     confirmInvoiceReviewJobInDatabase(getServerEnv(context), data.job),
+  )
+
+export const recheckInvoiceReviewJobServerFn = createServerFn({ method: 'POST' })
+  .inputValidator((data: { jobId: string }) => {
+    if (!data.jobId.trim()) {
+      throw new Error('Expected invoice review job id')
+    }
+
+    return { jobId: data.jobId.trim() }
+  })
+  .handler(async ({ data, context }) =>
+    recheckInvoiceReviewJobInDatabase(getServerEnv(context), data.jobId),
   )
 
 export async function confirmInvoiceReviewJobInDatabase(
@@ -237,6 +263,199 @@ export async function deleteInvoiceIntakeJobFromDatabase(
   }
 }
 
+export async function recheckInvoiceReviewJobInDatabase(
+  env: Partial<AppBindings> | null | undefined,
+  jobId: string,
+) {
+  const db = requireD1Database(env, 'invoice review recheck')
+  const rawDocumentsBucket = env?.RAW_DOCUMENTS
+
+  if (!rawDocumentsBucket) {
+    throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
+  }
+
+  const [row] = await allD1<RecheckSourceRow>(
+    db,
+    `/* invoice:recheck-source */
+    SELECT
+      intake_jobs.id AS jobId,
+      intake_jobs.stage AS stage,
+      source_documents.id AS sourceDocumentId,
+      source_documents.r2_key AS r2Key,
+      source_documents.original_filename AS fileName,
+      source_documents.mime_type AS mimeType,
+      source_documents.uploaded_at AS uploadedAt
+    FROM intake_jobs
+    INNER JOIN source_documents
+      ON source_documents.id = intake_jobs.source_document_id
+    WHERE intake_jobs.id = ?
+    LIMIT 1`,
+    [jobId],
+  )
+
+  if (!row) {
+    throw new Error('未找到发票任务，不能重新核对。')
+  }
+
+  if (row.stage === 'queued' || row.stage === 'extracting') {
+    throw new Error('发票正在抽取中，请等待当前核对完成。')
+  }
+
+  if (row.stage === 'deleting') {
+    throw new Error('发票任务正在删除，不能重新核对。')
+  }
+
+  if (!row.r2Key) {
+    throw new Error('发票原始文件缺少 R2 路径，不能重新核对。')
+  }
+
+  const startedAt = new Date().toISOString()
+  const startResult = await db
+    .prepare(
+      `/* invoice:recheck-start */
+      UPDATE intake_jobs
+      SET
+        stage = 'extracting',
+        error_message = NULL,
+        updated_at = ?
+      WHERE id = ?
+        AND stage NOT IN ('queued', 'extracting', 'deleting')`,
+    )
+    .bind(startedAt, row.jobId)
+    .run()
+
+  assertInvoiceMutationChanged(startResult, '发票正在处理或删除，不能重新核对。')
+
+  try {
+    const documentObject = await rawDocumentsBucket.get(row.r2Key)
+    if (!documentObject) {
+      throw new Error(`R2 object not found: ${row.r2Key}`)
+    }
+
+    const mimeType =
+      row.mimeType ||
+      documentObject.httpMetadata?.contentType ||
+      'application/octet-stream'
+    const providerInput = await buildInvoiceProviderInput({
+      fileName: row.fileName,
+      mimeType,
+      arrayBuffer: await documentObject.arrayBuffer(),
+    })
+    const provider = selectInvoiceExtractionProvider(env)
+    const extraction = await provider.extract(providerInput)
+    const extractionDraft = extraction.draft
+    const schemaVersion =
+      extractionDraft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION
+    const extractionStoredAt = new Date().toISOString()
+
+    const extractionResult = await db
+      .prepare(
+        `/* invoice:recheck-upsert-extraction */
+        INSERT INTO extraction_results (
+          id,
+          intake_job_id,
+          markdown_text,
+          structured_json,
+          raw_response,
+          schema_version,
+          created_at
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'extracting'
+        )
+        ON CONFLICT(id) DO UPDATE SET
+          markdown_text = excluded.markdown_text,
+          structured_json = excluded.structured_json,
+          raw_response = excluded.raw_response,
+          schema_version = excluded.schema_version,
+          created_at = excluded.created_at`,
+      )
+      .bind(
+        getExtractionResultId(row.jobId),
+        row.jobId,
+        extractionDraft.markdownText,
+        serializeExtractionDraft(extractionDraft),
+        extraction.rawResponse,
+        schemaVersion,
+        extractionStoredAt,
+        row.jobId,
+      )
+      .run()
+
+    assertInvoiceMutationChanged(extractionResult, '发票任务状态已变化，不能保存重新核对结果。')
+
+    await deleteConfirmedInvoiceAccountingRows(db, row.jobId)
+
+    const finishedAt = new Date().toISOString()
+    const successResult = await db
+      .prepare(
+        `/* invoice:recheck-finish */
+        UPDATE intake_jobs
+        SET
+          stage = 'needs_review',
+          extractor_provider = ?,
+          extractor_model = ?,
+          confidence_score = ?,
+          error_message = NULL,
+          updated_at = ?
+        WHERE id = ? AND stage = 'extracting'`,
+      )
+      .bind(
+        provider.id,
+        provider.model,
+        calculateDraftConfidence(extractionDraft),
+        finishedAt,
+        row.jobId,
+      )
+      .run()
+
+    assertInvoiceMutationChanged(successResult, '发票任务状态已变化，不能完成重新核对。')
+
+    await db
+      .prepare(
+        `/* invoice:recheck-source-processed */
+        UPDATE source_documents
+        SET status = 'processed'
+        WHERE id = ?`,
+      )
+      .bind(row.sourceDocumentId)
+      .run()
+
+    return buildRecheckedInvoiceJob({
+      row,
+      extractionDraft,
+    })
+  } catch (error) {
+    const failedAt = new Date().toISOString()
+    await db
+      .prepare(
+        `/* invoice:recheck-error */
+        UPDATE intake_jobs
+        SET
+          stage = 'error',
+          error_message = ?,
+          updated_at = ?
+        WHERE id = ? AND stage = 'extracting'`,
+      )
+      .bind(formatInvoiceMutationError(error), failedAt, row.jobId)
+      .run()
+    await db
+      .prepare(
+        `/* invoice:recheck-source-error */
+        UPDATE source_documents
+        SET status = 'error'
+        WHERE id = ?`,
+      )
+      .bind(row.sourceDocumentId)
+      .run()
+    throw error
+  }
+}
+
 async function persistInvoiceReviewDraft(
   env: Partial<AppBindings> | null | undefined,
   job: InvoiceReviewJob,
@@ -354,6 +573,72 @@ async function persistInvoiceReviewDraft(
     lineItems: nextLineItems,
     status: mapIntakeStageToInvoiceStatus(nextStage),
   }
+}
+
+async function deleteConfirmedInvoiceAccountingRows(db: D1Database, jobId: string) {
+  const invoiceId = getInvoiceId(jobId)
+  const ledgerEntryId = getLedgerEntryId(invoiceId)
+  const statements = [
+    db
+      .prepare(
+        `/* invoice:recheck-delete-ledger */
+        DELETE FROM ledger_entries
+        WHERE id = ?`,
+      )
+      .bind(ledgerEntryId),
+    db
+      .prepare(
+        `/* invoice:recheck-delete-items */
+        DELETE FROM invoice_items
+        WHERE invoice_id = ?`,
+      )
+      .bind(invoiceId),
+    db
+      .prepare(
+        `/* invoice:recheck-delete-invoice */
+        DELETE FROM invoices
+        WHERE id = ?`,
+      )
+      .bind(invoiceId),
+  ]
+
+  if (typeof db.batch === 'function') {
+    await db.batch(statements)
+    return
+  }
+
+  for (const statement of statements) {
+    await statement.run()
+  }
+}
+
+function buildRecheckedInvoiceJob(input: {
+  row: RecheckSourceRow
+  extractionDraft: InvoiceExtractionDraft
+}): InvoiceReviewJob {
+  return {
+    jobId: input.row.jobId,
+    fileName: input.row.fileName,
+    uploadedAt: input.row.uploadedAt,
+    pageCount: Math.max(1, input.extractionDraft.pageCount),
+    status: 'needs_review',
+    stage: 'needs_review',
+    errorMessage: null,
+    header: input.extractionDraft.header,
+    lineItems: input.extractionDraft.lineItems.map((item) => ({ ...item })),
+    extraction: {
+      provider: input.extractionDraft.provider,
+      model: input.extractionDraft.model,
+      overallConfidence: input.extractionDraft.confidence?.overall,
+      warnings: input.extractionDraft.warnings ?? [],
+      schemaVersion:
+        input.extractionDraft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION,
+    },
+  }
+}
+
+function formatInvoiceMutationError(error: unknown) {
+  return error instanceof Error ? error.message : '重新核对失败。'
 }
 
 async function writeConfirmedInvoiceAccounting(

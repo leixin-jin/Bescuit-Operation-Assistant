@@ -51,7 +51,7 @@ describe('invoice extraction helpers', () => {
       },
       warnings: [],
       provider: 'gemini',
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash',
     }
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       new Response(
@@ -71,7 +71,7 @@ describe('invoice extraction helpers', () => {
     try {
       const provider = createGeminiInvoiceExtractionProvider({
         apiKey: 'test-key',
-        model: 'gemini-3.1-flash-lite',
+        model: 'gemini-3.5-flash',
         timeoutMs: 1000,
       })
 
@@ -123,12 +123,12 @@ describe('invoice extraction helpers', () => {
   test('selects Gemini provider from configured extraction env', () => {
     const provider = selectInvoiceExtractionProvider({
       INVOICE_EXTRACTION_PROVIDER: 'gemini',
-      INVOICE_EXTRACTION_MODEL: 'gemini-3.1-flash-lite',
+      INVOICE_EXTRACTION_MODEL: 'gemini-3.5-flash',
       GEMINI_API_KEY: 'test-key',
     })
 
     expect(provider.id).toBe('gemini')
-    expect(provider.model).toBe('gemini-3.1-flash-lite')
+    expect(provider.model).toBe('gemini-3.5-flash')
   })
 
   test('rejects provider JSON that does not match v2 schema', () => {
@@ -141,7 +141,7 @@ describe('invoice extraction helpers', () => {
         }),
         fileName: 'bad.pdf',
         provider: 'gemini',
-        model: 'gemini-3.1-flash-lite',
+        model: 'gemini-3.5-flash',
       }),
     ).toThrow(/schema/i)
   })
@@ -187,7 +187,7 @@ describe('invoice extraction helpers', () => {
       }),
       fileName: 'factura.pdf',
       provider: 'gemini',
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash',
       documentKind: 'pdf',
     })
 
@@ -255,11 +255,11 @@ describe('invoice extraction helpers', () => {
         },
         warnings: [],
         provider: 'gemini',
-        model: 'gemini-3.1-flash-lite',
+        model: 'gemini-3.5-flash',
       }),
       fileName: 'Factura venta FP26020968.pdf',
       provider: 'gemini',
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash',
       documentKind: 'pdf',
     })
 
@@ -341,11 +341,11 @@ describe('invoice extraction helpers', () => {
         },
         warnings: [],
         provider: 'gemini',
-        model: 'gemini-3.1-flash-lite',
+        model: 'gemini-3.5-flash',
       }),
       fileName: 'iva-incluido.pdf',
       provider: 'gemini',
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash',
       documentKind: 'pdf',
     })
 
@@ -396,11 +396,11 @@ describe('invoice extraction helpers', () => {
         },
         warnings: [],
         provider: 'gemini',
-        model: 'gemini-3.1-flash-lite',
+        model: 'gemini-3.5-flash',
       }),
       fileName: 'sin-total.pdf',
       provider: 'gemini',
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash',
       documentKind: 'pdf',
     })
 
@@ -459,11 +459,11 @@ describe('invoice extraction helpers', () => {
         },
         warnings: [],
         provider: 'gemini',
-        model: 'gemini-3.1-flash-lite',
+        model: 'gemini-3.5-flash',
       }),
       fileName: 'iva-fraccion.pdf',
       provider: 'gemini',
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash',
       documentKind: 'pdf',
     })
 
@@ -519,11 +519,11 @@ describe('invoice extraction helpers', () => {
         },
         warnings: [],
         provider: 'gemini',
-        model: 'gemini-3.1-flash-lite',
+        model: 'gemini-3.5-flash',
       }),
       fileName: 'decimal-comma.pdf',
       provider: 'gemini',
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash',
       documentKind: 'pdf',
     })
 
@@ -576,13 +576,13 @@ describe('invoice extraction helpers', () => {
         },
         warnings: ['Line item total requires review'],
         provider: 'gemini',
-        model: 'gemini-3.1-flash-lite',
+        model: 'gemini-3.5-flash',
       }),
     })
 
     expect(job.extraction).toMatchObject({
       provider: 'gemini',
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash',
       overallConfidence: 0.81,
       warnings: ['Line item total requires review'],
       schemaVersion: 'invoice-extraction-v2',

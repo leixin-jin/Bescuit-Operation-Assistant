@@ -23,6 +23,7 @@ import {
 import {
   confirmInvoiceReviewJobInDatabase,
   deleteInvoiceIntakeJobFromDatabase,
+  recheckInvoiceReviewJobInDatabase,
 } from '@/lib/server/mutations/invoices.rpc'
 import { processInvoiceIntakeQueueMessage } from '@/lib/server/extraction'
 import { assertDemoDataEnabled } from '@/lib/server/runtime-config'
@@ -365,6 +366,107 @@ describe('invoice review D1 integration', () => {
     })
   })
 
+  test('rechecking a booked invoice reruns extraction and returns it to review', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-recheck',
+          r2_key: 'raw-documents/2026/04/src-recheck-invoice.pdf',
+          original_filename: 'recheck-invoice.pdf',
+          mime_type: 'application/pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-recheck',
+          source_document_id: 'src-recheck',
+          stage: 'ready',
+        }),
+      ],
+      extraction_results: [
+        {
+          id: 'ext_job-recheck',
+          intake_job_id: 'job-recheck',
+          markdown_text: '',
+          structured_json: JSON.stringify({
+            pageCount: 1,
+            header: {
+              supplier: 'Old Supplier',
+              invoiceNo: 'OLD-1',
+              date: '2026-04-20',
+              totalAmount: '121.00',
+              taxAmount: '21.00',
+              notes: '',
+            },
+            lineItems: [
+              {
+                id: 'old-line-1',
+                name: 'Old Item',
+                qty: '1',
+                unit: 'unit',
+                unitPrice: '121.00',
+                ingredient: '',
+                matched: false,
+              },
+            ],
+          }),
+          raw_response: null,
+          schema_version: 'invoice-extraction-v1',
+          created_at: '2026-04-27T10:00:00.000Z',
+        },
+      ],
+      invoices: [
+        createInvoiceRow({
+          id: 'inv_job-recheck',
+          intake_job_id: 'job-recheck',
+          source_document_id: 'src-recheck',
+        }),
+      ],
+      invoice_items: [
+        {
+          id: 'inv_job-recheck_item_1',
+          invoice_id: 'inv_job-recheck',
+          raw_product_name: 'Old Item',
+          raw_quantity: 1,
+          raw_unit: 'unit',
+          raw_unit_price: 121,
+          raw_line_total: 121,
+          ingredient_id: null,
+          normalized_quantity: 1,
+          normalized_unit: 'unit',
+          normalized_unit_price: 121,
+          mapping_status: 'unmatched',
+        },
+      ],
+      ledger_entries: [
+        createLedgerRow({
+          id: 'ledger_inv_job-recheck',
+          source_kind: 'invoice',
+          source_id: 'inv_job-recheck',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-recheck-invoice.pdf': {
+        body: '%PDF-recheck-bytes',
+        contentType: 'application/pdf',
+      },
+    })
+
+    const result = await recheckInvoiceReviewJobInDatabase(env, 'job-recheck')
+
+    expect(result.stage).toBe('needs_review')
+    expect(result.status).toBe('needs_review')
+    expect(tables.intake_jobs[0]).toMatchObject({
+      stage: 'needs_review',
+      error_message: null,
+    })
+    expect(tables.extraction_results[0]?.raw_response).toContain('filename-fallback')
+    expect(tables.invoices).toHaveLength(0)
+    expect(tables.invoice_items).toHaveLength(0)
+    expect(tables.ledger_entries).toHaveLength(0)
+  })
+
   test('confirming an invoice no longer requires ingredient mapping and preserves stored tax-included totals', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [createSourceDocumentRow({ id: 'src-tax-included' })],
@@ -408,7 +510,7 @@ describe('invoice review D1 integration', () => {
             ],
             markdownText: '',
             provider: 'gemini',
-            model: 'gemini-3.1-flash-lite',
+            model: 'gemini-3.5-flash',
           }),
           raw_response: null,
           schema_version: 'invoice-extraction-v2',
@@ -1502,6 +1604,28 @@ class FakeD1PreparedStatement {
         : []
     }
 
+    if (sql.includes('invoice:recheck-source')) {
+      const [jobId] = this.params
+      const job = this.tables.intake_jobs.find((row) => row.id === jobId)
+      const sourceDocument = this.tables.source_documents.find(
+        (row) => row.id === job?.source_document_id,
+      )
+
+      return job && sourceDocument
+        ? [
+            {
+              jobId: job.id,
+              stage: job.stage,
+              sourceDocumentId: sourceDocument.id,
+              r2Key: sourceDocument.r2_key,
+              fileName: sourceDocument.original_filename,
+              mimeType: sourceDocument.mime_type,
+              uploadedAt: sourceDocument.uploaded_at,
+            },
+          ]
+        : []
+    }
+
     if (sql.includes('invoice:latest-extraction')) {
       const [jobId] = this.params
       return this.tables.extraction_results
@@ -1627,7 +1751,10 @@ class FakeD1PreparedStatement {
       return 1
     }
 
-    if (sql.includes('invoice:queue-upsert-extraction')) {
+    if (
+      sql.includes('invoice:queue-upsert-extraction') ||
+      sql.includes('invoice:recheck-upsert-extraction')
+    ) {
       const [
         id,
         intakeJobId,
@@ -1773,6 +1900,103 @@ class FakeD1PreparedStatement {
         row.updated_at = String(updatedAt)
       }
       return row ? 1 : 0
+    }
+
+    if (sql.includes('invoice:recheck-start')) {
+      const [updatedAt, jobId] = this.params
+      const row = this.tables.intake_jobs.find(
+        (candidate) =>
+          candidate.id === jobId &&
+          !['queued', 'extracting', 'deleting'].includes(candidate.stage),
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.stage = 'extracting'
+      row.error_message = null
+      row.updated_at = String(updatedAt)
+      return 1
+    }
+
+    if (sql.includes('invoice:recheck-finish')) {
+      const [provider, model, confidenceScore, updatedAt, jobId] = this.params
+      const row = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage === 'extracting',
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.stage = 'needs_review'
+      row.extractor_provider = String(provider)
+      row.extractor_model = String(model)
+      row.confidence_score = Number(confidenceScore)
+      row.error_message = null
+      row.updated_at = String(updatedAt)
+      return 1
+    }
+
+    if (sql.includes('invoice:recheck-error')) {
+      const [errorMessage, updatedAt, jobId] = this.params
+      const row = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage === 'extracting',
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.stage = 'error'
+      row.error_message = String(errorMessage)
+      row.updated_at = String(updatedAt)
+      return 1
+    }
+
+    if (
+      sql.includes('invoice:recheck-source-processed') ||
+      sql.includes('invoice:recheck-source-error')
+    ) {
+      const [sourceDocumentId] = this.params
+      const row = this.tables.source_documents.find(
+        (candidate) => candidate.id === sourceDocumentId,
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.status = sql.includes('invoice:recheck-source-processed')
+        ? 'processed'
+        : 'error'
+      return 1
+    }
+
+    if (sql.includes('invoice:recheck-delete-ledger')) {
+      const [ledgerEntryId] = this.params
+      const beforeCount = this.tables.ledger_entries.length
+      this.tables.ledger_entries = this.tables.ledger_entries.filter(
+        (row) => row.id !== ledgerEntryId,
+      )
+      return beforeCount - this.tables.ledger_entries.length
+    }
+
+    if (sql.includes('invoice:recheck-delete-items')) {
+      const [invoiceId] = this.params
+      const beforeCount = this.tables.invoice_items.length
+      this.tables.invoice_items = this.tables.invoice_items.filter(
+        (row) => row.invoice_id !== invoiceId,
+      )
+      return beforeCount - this.tables.invoice_items.length
+    }
+
+    if (sql.includes('invoice:recheck-delete-invoice')) {
+      const [invoiceId] = this.params
+      const beforeCount = this.tables.invoices.length
+      this.tables.invoices = this.tables.invoices.filter((row) => row.id !== invoiceId)
+      return beforeCount - this.tables.invoices.length
     }
 
     if (sql.includes('invoice:delete-extractions')) {
