@@ -2,7 +2,7 @@
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
-import { describe, expect, test, vi } from 'vitest'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { createInvoiceJob, saveInvoiceJob } from '@/features/invoices/mock-store'
 import { routeTree } from '@/routeTree.gen'
@@ -10,6 +10,10 @@ import { routeTree } from '@/routeTree.gen'
 const analyticsMocks = vi.hoisted(() => ({
   getCalendarAnalyticsSummaryServerFn: vi.fn(),
   getMonthlyAnalyticsSummaryServerFn: vi.fn(),
+}))
+
+const expenseMutationMocks = vi.hoisted(() => ({
+  createManualExpenseServerFn: vi.fn(),
 }))
 
 vi.mock('@/styles/globals.css?url', () => ({
@@ -65,6 +69,26 @@ vi.mock('@/lib/server/queries/analytics', async (importOriginal) => {
   }
 })
 
+vi.mock('@/lib/server/queries/expenses', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/server/queries/expenses')>()
+  return {
+    ...actual,
+    getExpenseEntryPageDataServerFn: vi.fn(async () => ({
+      date: '2026-05-25',
+      supplierOptions: ['Makro Madrid', 'Bodega Local'],
+      recentExpenses: [],
+    })),
+  }
+})
+
+vi.mock('@/lib/server/mutations/expenses', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/server/mutations/expenses')>()
+  return {
+    ...actual,
+    createManualExpenseServerFn: expenseMutationMocks.createManualExpenseServerFn,
+  }
+})
+
 vi.mock('@/components/year-month-picker', () => ({
   YearMonthPicker: ({
     value,
@@ -91,6 +115,21 @@ vi.mock('@/components/year-month-picker', () => ({
     )
   },
 }))
+
+beforeEach(() => {
+  expenseMutationMocks.createManualExpenseServerFn.mockImplementation(async (input) => ({
+    id: 'manual-expense-test',
+    entryDate: input.data.date,
+    entryType: 'expense',
+    category: 'manual',
+    amount: Number(input.data.amount),
+    vendor: input.data.supplierName,
+    note: input.data.note,
+    sourceKind: 'manual',
+    sourceId: 'manual-expense-test',
+    createdAt: '2026-05-25T10:00:00.000Z',
+  }))
+})
 
 async function renderRoute(initialPath = '/') {
   const history = createMemoryHistory({
@@ -227,6 +266,89 @@ describe('phase 1-4 smoke tests', () => {
     expect((screen.getByRole('button', { name: /确认提交/ }) as HTMLButtonElement).disabled).toBe(
       true,
     )
+  })
+
+  test('expense entry page renders supplier options and submits an expense', async () => {
+    await renderRoute('/expenses/new')
+
+    expect(await screen.findByRole('heading', { name: '支出录入' })).toBeTruthy()
+    expect(screen.getByLabelText('选择日期')).toBeTruthy()
+    expect(screen.getByLabelText('供应商')).toBeTruthy()
+    expect(screen.getByLabelText('价格')).toBeTruthy()
+    const supplierOptions = Array.from(
+      document.querySelectorAll<HTMLOptionElement>(
+        '#expense-supplier-options option',
+      ),
+    ).map((option) => option.value)
+
+    expect(supplierOptions).toContain('Makro Madrid')
+    expect(supplierOptions).toContain('Bodega Local')
+
+    fireEvent.change(screen.getByLabelText('供应商'), {
+      target: { value: 'Makro Madrid' },
+    })
+    fireEvent.change(screen.getByLabelText('价格'), {
+      target: { value: '42.10' },
+    })
+    fireEvent.change(screen.getByLabelText('备注（可选）'), {
+      target: { value: 'late delivery' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /确认提交/ }))
+
+    expect(await screen.findByText('支出已提交。')).toBeTruthy()
+    expect(expenseMutationMocks.createManualExpenseServerFn).toHaveBeenCalledWith({
+      data: {
+        date: '2026-05-25',
+        supplierName: 'Makro Madrid',
+        amount: '42.10',
+        note: 'late delivery',
+      },
+    })
+  })
+
+  test('expense entry page shows feedback when expense submission fails', async () => {
+    expenseMutationMocks.createManualExpenseServerFn.mockRejectedValueOnce(
+      new Error('database unavailable'),
+    )
+
+    await renderRoute('/expenses/new')
+
+    fireEvent.change(await screen.findByLabelText('供应商'), {
+      target: { value: 'Makro Madrid' },
+    })
+    fireEvent.change(screen.getByLabelText('价格'), {
+      target: { value: '42.10' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /确认提交/ }))
+
+    expect(await screen.findByText('支出提交失败，请稍后重试。')).toBeTruthy()
+  })
+
+  test('expense entry page keeps submit disabled without a valid date', async () => {
+    await renderRoute('/expenses/new')
+
+    fireEvent.change(await screen.findByLabelText('选择日期'), {
+      target: { value: '' },
+    })
+    fireEvent.change(screen.getByLabelText('供应商'), {
+      target: { value: 'Makro Madrid' },
+    })
+    fireEvent.change(screen.getByLabelText('价格'), {
+      target: { value: '42.10' },
+    })
+
+    expect((screen.getByRole('button', { name: /确认提交/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    )
+  })
+
+  test('sidebar links to expense entry page', async () => {
+    await renderRoute('/expenses/new')
+
+    const activeLink = await screen.findByRole('link', { name: '支出录入' })
+    expect(activeLink.getAttribute('data-active')).toBe('true')
   })
 
   test('analytics calendar page renders monthly summary cards', async () => {

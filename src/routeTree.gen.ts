@@ -14,6 +14,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as SalesNewRouteImport } from './routes/sales/new'
 import { Route as InvoicesReviewRouteImport } from './routes/invoices/review'
 import { Route as InvoicesNewRouteImport } from './routes/invoices/new'
+import { Route as ExpensesNewRouteImport } from './routes/expenses/new'
 import { Route as AnalyticsMonthlyRouteImport } from './routes/analytics/monthly'
 import { Route as AnalyticsCalendarRouteImport } from './routes/analytics/calendar'
 import { Route as InvoicesReviewJobIdRouteImport } from './routes/invoices/review/$jobId'
@@ -43,6 +44,11 @@ const InvoicesNewRoute = InvoicesNewRouteImport.update({
   path: '/invoices/new',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ExpensesNewRoute = ExpensesNewRouteImport.update({
+  id: '/expenses/new',
+  path: '/expenses/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AnalyticsMonthlyRoute = AnalyticsMonthlyRouteImport.update({
   id: '/analytics/monthly',
   path: '/analytics/monthly',
@@ -64,6 +70,7 @@ export interface FileRoutesByFullPath {
   '/calendar': typeof CalendarRoute
   '/analytics/calendar': typeof AnalyticsCalendarRoute
   '/analytics/monthly': typeof AnalyticsMonthlyRoute
+  '/expenses/new': typeof ExpensesNewRoute
   '/invoices/new': typeof InvoicesNewRoute
   '/invoices/review': typeof InvoicesReviewRouteWithChildren
   '/sales/new': typeof SalesNewRoute
@@ -74,6 +81,7 @@ export interface FileRoutesByTo {
   '/calendar': typeof CalendarRoute
   '/analytics/calendar': typeof AnalyticsCalendarRoute
   '/analytics/monthly': typeof AnalyticsMonthlyRoute
+  '/expenses/new': typeof ExpensesNewRoute
   '/invoices/new': typeof InvoicesNewRoute
   '/invoices/review': typeof InvoicesReviewRouteWithChildren
   '/sales/new': typeof SalesNewRoute
@@ -85,6 +93,7 @@ export interface FileRoutesById {
   '/calendar': typeof CalendarRoute
   '/analytics/calendar': typeof AnalyticsCalendarRoute
   '/analytics/monthly': typeof AnalyticsMonthlyRoute
+  '/expenses/new': typeof ExpensesNewRoute
   '/invoices/new': typeof InvoicesNewRoute
   '/invoices/review': typeof InvoicesReviewRouteWithChildren
   '/sales/new': typeof SalesNewRoute
@@ -97,6 +106,7 @@ export interface FileRouteTypes {
     | '/calendar'
     | '/analytics/calendar'
     | '/analytics/monthly'
+    | '/expenses/new'
     | '/invoices/new'
     | '/invoices/review'
     | '/sales/new'
@@ -107,6 +117,7 @@ export interface FileRouteTypes {
     | '/calendar'
     | '/analytics/calendar'
     | '/analytics/monthly'
+    | '/expenses/new'
     | '/invoices/new'
     | '/invoices/review'
     | '/sales/new'
@@ -117,6 +128,7 @@ export interface FileRouteTypes {
     | '/calendar'
     | '/analytics/calendar'
     | '/analytics/monthly'
+    | '/expenses/new'
     | '/invoices/new'
     | '/invoices/review'
     | '/sales/new'
@@ -128,6 +140,7 @@ export interface RootRouteChildren {
   CalendarRoute: typeof CalendarRoute
   AnalyticsCalendarRoute: typeof AnalyticsCalendarRoute
   AnalyticsMonthlyRoute: typeof AnalyticsMonthlyRoute
+  ExpensesNewRoute: typeof ExpensesNewRoute
   InvoicesNewRoute: typeof InvoicesNewRoute
   InvoicesReviewRoute: typeof InvoicesReviewRouteWithChildren
   SalesNewRoute: typeof SalesNewRoute
@@ -168,6 +181,13 @@ declare module '@tanstack/react-router' {
       path: '/invoices/new'
       fullPath: '/invoices/new'
       preLoaderRoute: typeof InvoicesNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/expenses/new': {
+      id: '/expenses/new'
+      path: '/expenses/new'
+      fullPath: '/expenses/new'
+      preLoaderRoute: typeof ExpensesNewRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/analytics/monthly': {
@@ -211,6 +231,7 @@ const rootRouteChildren: RootRouteChildren = {
   CalendarRoute: CalendarRoute,
   AnalyticsCalendarRoute: AnalyticsCalendarRoute,
   AnalyticsMonthlyRoute: AnalyticsMonthlyRoute,
+  ExpensesNewRoute: ExpensesNewRoute,
   InvoicesNewRoute: InvoicesNewRoute,
   InvoicesReviewRoute: InvoicesReviewRouteWithChildren,
   SalesNewRoute: SalesNewRoute,

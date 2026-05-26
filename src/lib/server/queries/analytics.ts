@@ -3,6 +3,7 @@ import { createServerFn } from '@tanstack/react-start'
 import type {
   CalendarAnalyticsSummary,
   CalendarDaySummary,
+  ManualExpenseRecord,
   MonthlyAnalyticsSummary,
   SalesDailyRecord,
 } from '@/lib/server/app-domain'
@@ -13,7 +14,10 @@ import {
 } from '@/lib/server/app-domain'
 import { getServerEnv, type AppBindings } from '@/lib/server/bindings'
 import { allD1, requireD1Database } from '@/lib/server/d1'
-import { listStoredSalesRecords } from '@/lib/server/demo-data'
+import {
+  listStoredManualExpenses,
+  listStoredSalesRecords,
+} from '@/lib/server/demo-data'
 import { assertDemoDataEnabled } from '@/lib/server/runtime-config'
 
 interface SalesAnalyticsRow {
@@ -375,7 +379,10 @@ async function getDemoCalendarAnalyticsSummary(selectedMonth: string) {
   const salesRows = listStoredSalesRecords()
     .filter((record) => record.status === 'submitted' && record.date.startsWith(selectedMonth))
     .map(toSalesAnalyticsRow)
-  const daySummaries = buildCalendarDaySummaries(salesRows, [])
+  const expenseRows = listStoredManualExpenses()
+    .filter((record) => record.entryDate.startsWith(selectedMonth))
+    .map(toExpenseAnalyticsRow)
+  const daySummaries = buildCalendarDaySummaries(salesRows, expenseRows)
   const { income, expense } = sumCalendarDaySummaries(daySummaries)
 
   return {
@@ -397,13 +404,16 @@ async function getDemoMonthlyAnalyticsSummary(selectedMonth: string) {
   const salesRows = listStoredSalesRecords()
     .filter((record) => record.status === 'submitted' && record.date.startsWith(selectedMonth))
     .map(toSalesAnalyticsRow)
+  const expenseRows = listStoredManualExpenses()
+    .filter((record) => record.entryDate.startsWith(selectedMonth))
+    .map(toExpenseAnalyticsRow)
 
   return buildMonthlyAnalyticsSummary({
     selectedMonth,
     currentMonth,
     previousMonth,
     incomeBreakdown: buildIncomeBreakdown(salesRows),
-    expenseBreakdown: [],
+    expenseBreakdown: buildExpenseBreakdown(expenseRows),
   })
 }
 
@@ -418,5 +428,14 @@ function toSalesAnalyticsRow(record: SalesDailyRecord): SalesAnalyticsRow {
     status: record.status,
     note: record.note,
     updatedAt: record.updatedAt,
+  }
+}
+
+function toExpenseAnalyticsRow(record: ManualExpenseRecord): ExpenseAnalyticsRow {
+  return {
+    entryDate: record.entryDate,
+    category: record.category,
+    vendor: record.vendor,
+    amount: record.amount,
   }
 }

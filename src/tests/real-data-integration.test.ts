@@ -104,6 +104,154 @@ describe('sales D1 integration', () => {
   })
 })
 
+describe('expense D1 integration', () => {
+  test('manual expense fallback persists recent expenses and analytics without D1', async () => {
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'window')
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: undefined,
+    })
+
+    const { getCalendarAnalyticsSummary, getMonthlyAnalyticsSummary } = await import(
+      '@/lib/server/queries/analytics'
+    )
+    const { getExpenseEntryPageData } = await import(
+      '@/lib/server/queries/expenses'
+    )
+    const { createManualExpense } = await import(
+      '@/lib/server/mutations/expenses'
+    )
+
+    try {
+      await expect(getExpenseEntryPageData(undefined, '2026-05-25')).resolves.toMatchObject({
+        date: '2026-05-25',
+        recentExpenses: [],
+      })
+
+      const createdExpense = await createManualExpense(undefined, {
+        date: '2026-05-25',
+        supplierName: 'Makro Madrid',
+        amount: '42.10',
+        note: 'fallback note',
+      })
+
+      await expect(getExpenseEntryPageData(undefined, '2026-05-25')).resolves.toMatchObject({
+        date: '2026-05-25',
+        recentExpenses: [
+          {
+            id: createdExpense.id,
+            entryDate: '2026-05-25',
+            amount: 42.1,
+            vendor: 'Makro Madrid',
+            note: 'fallback note',
+            sourceKind: 'manual',
+            sourceId: createdExpense.id,
+          },
+        ],
+      })
+
+      await expect(getCalendarAnalyticsSummary(undefined, '2026-05')).resolves.toMatchObject({
+        days: {
+          '25': {
+            expense: 42.1,
+          },
+        },
+        totalExpense: 42.1,
+      })
+      await expect(getMonthlyAnalyticsSummary(undefined, '2026-05')).resolves.toMatchObject({
+        expenseBreakdown: [
+          {
+            name: 'Makro Madrid',
+            value: 42.1,
+            percentage: 100,
+          },
+        ],
+      })
+    } finally {
+      if (windowDescriptor) {
+        Object.defineProperty(globalThis, 'window', windowDescriptor)
+      }
+    }
+  })
+
+  test('manual expense entry inserts ledger expense with supplier and note', async () => {
+    const env = createTestEnv({
+      invoices: [
+        {
+          id: 'inv-existing',
+          intake_job_id: null,
+          invoice_date: '2026-05-20',
+          supplier_name: 'Makro Madrid',
+          document_number: 'MK-1',
+          subtotal_amount: null,
+          tax_amount: 0,
+          total_amount: 100,
+          payment_method: null,
+          currency: 'EUR',
+          source_document_id: null,
+          review_status: 'ready',
+          created_at: '2026-05-20T10:00:00.000Z',
+          updated_at: '2026-05-20T10:00:00.000Z',
+        },
+      ],
+      ledger_entries: [],
+    })
+
+    const { getExpenseEntryPageData } = await import(
+      '@/lib/server/queries/expenses'
+    )
+    const { createManualExpense } = await import(
+      '@/lib/server/mutations/expenses'
+    )
+
+    await expect(getExpenseEntryPageData(env, '2026-05-25')).resolves.toMatchObject({
+      date: '2026-05-25',
+      supplierOptions: ['Makro Madrid'],
+      recentExpenses: [],
+    })
+
+    const createdExpense = await createManualExpense(env, {
+      date: '2026-05-25',
+      supplierName: 'Makro Madrid',
+      amount: '42.10',
+      note: 'late delivery',
+    })
+
+    expect(createdExpense).toMatchObject({
+      entryDate: '2026-05-25',
+      vendor: 'Makro Madrid',
+      note: 'late delivery',
+      sourceKind: 'manual',
+    })
+    expect(createdExpense.sourceId).toBe(createdExpense.id)
+
+    expect(env.DB.tables.ledger_entries).toHaveLength(1)
+    expect(env.DB.tables.ledger_entries[0]).toMatchObject({
+      entry_date: '2026-05-25',
+      entry_type: 'expense',
+      category: 'manual',
+      amount: 42.1,
+      vendor: 'Makro Madrid',
+      note: 'late delivery',
+      source_kind: 'manual',
+    })
+
+    await expect(getExpenseEntryPageData(env, '2026-05-25')).resolves.toMatchObject({
+      recentExpenses: [
+        {
+          id: createdExpense.id,
+          entryDate: '2026-05-25',
+          amount: 42.1,
+          vendor: 'Makro Madrid',
+          note: 'late delivery',
+          sourceKind: 'manual',
+          sourceId: createdExpense.id,
+        },
+      ],
+    })
+  })
+})
+
 describe('dashboard and analytics D1 integration', () => {
   test('empty months stay empty instead of using generated seed data', async () => {
     const { env } = createFakeD1Env()
@@ -361,6 +509,7 @@ describe('invoice review D1 integration', () => {
       category: 'purchase',
       amount: 121,
       vendor: 'Makro Madrid',
+      note: '',
       source_kind: 'invoice',
       source_id: tables.invoices[0]?.id,
     })
@@ -1374,6 +1523,7 @@ interface LedgerEntryRow {
   amount: number
   account: string | null
   vendor: string | null
+  note: string
   source_kind: string
   source_id: string
   created_at: string
@@ -1401,6 +1551,11 @@ function createFakeD1Env(
     } satisfies Partial<AppBindings> as AppBindings,
     tables,
   }
+}
+
+function createTestEnv(initialTables: FakeTableInput = {}) {
+  const { env } = createFakeD1Env(initialTables)
+  return env as AppBindings & { DB: D1Database & { tables: FakeTables } }
 }
 
 class FakeD1Database {
@@ -1482,6 +1637,40 @@ class FakeD1PreparedStatement {
         .sort((left, right) => right.date.localeCompare(left.date))
         .slice(0, Number(limit))
         .map(toSalesResult)
+    }
+
+    if (sql.includes('expenses:supplier-options')) {
+      const supplierNames = new Set(
+        this.tables.invoices
+          .map((row) => row.supplier_name)
+          .filter((supplierName) => supplierName.trim() !== ''),
+      )
+
+      return Array.from(supplierNames)
+        .sort((left, right) => left.localeCompare(right))
+        .map((supplierName) => ({ supplierName }))
+    }
+
+    if (sql.includes('expenses:list-manual-by-date')) {
+      const [date] = this.params
+      return this.tables.ledger_entries
+        .filter(
+          (row) =>
+            row.entry_type === 'expense' &&
+            row.source_kind === 'manual' &&
+            row.entry_date === date,
+        )
+        .slice()
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))
+        .map((row) => ({
+          id: row.id,
+          entryDate: row.entry_date,
+          amount: row.amount,
+          vendor: row.vendor,
+          note: row.note,
+          sourceId: row.source_id,
+          createdAt: row.created_at,
+        }))
     }
 
     if (sql.includes('analytics:sales-month')) {
@@ -1695,6 +1884,32 @@ class FakeD1PreparedStatement {
       } else {
         this.tables.sales_daily.push(nextRow)
       }
+      return 1
+    }
+
+    if (sql.includes('expenses:insert-manual')) {
+      const [
+        id,
+        entryDate,
+        amount,
+        vendor,
+        note,
+        sourceId,
+        createdAt,
+      ] = this.params
+      this.tables.ledger_entries.push({
+        id: String(id),
+        entry_date: String(entryDate),
+        entry_type: 'expense',
+        category: 'manual',
+        amount: Number(amount),
+        account: null,
+        vendor: String(vendor),
+        note: String(note),
+        source_kind: 'manual',
+        source_id: String(sourceId),
+        created_at: String(createdAt),
+      })
       return 1
     }
 
@@ -2154,6 +2369,7 @@ class FakeD1PreparedStatement {
         amount: Number(amount),
         account: null,
         vendor: String(vendor),
+        note: '',
         source_kind: 'invoice',
         source_id: String(sourceId),
         created_at: String(now),
@@ -2219,6 +2435,7 @@ function createLedgerRow(overrides: Partial<LedgerEntryRow> = {}): LedgerEntryRo
     amount: 0,
     account: null,
     vendor: null,
+    note: '',
     source_kind: 'manual',
     source_id: 'manual-1',
     created_at: '2026-04-27T20:00:00.000Z',

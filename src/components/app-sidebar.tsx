@@ -6,6 +6,7 @@ import {
   Receipt,
   TrendingUp,
   Calendar,
+  WalletCards,
   Wine,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -24,6 +25,7 @@ import {
 const navItems = [
   { title: "首页", href: "/", icon: Home },
   { title: "营业额录入", href: "/sales/new", icon: TrendingUp },
+  { title: "支出录入", href: "/expenses/new", icon: WalletCards },
   { title: "发票核对", href: "/invoices/new", icon: Receipt },
   { title: "数据分析", href: "/analytics/monthly", icon: TrendingUp },
   { title: "日历概览", href: "/analytics/calendar", icon: Calendar },

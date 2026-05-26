@@ -4,6 +4,8 @@ import type {
   InvoiceJobStatus,
   InvoiceLineItemDraft,
   InvoiceReviewJob,
+  ManualExpenseDraftInput,
+  ManualExpenseRecord,
   SalesDailyDraftInput,
   SalesDailyRecord,
   SalesRecordStatus,
@@ -13,15 +15,18 @@ import {
   getMadridTodayInputValue,
   getMonthOptions,
   isInvoiceJobDeletable,
+  normalizeManualExpenseInput,
   normalizeSalesDraftInput,
   parseCurrencyAmount,
   roundCurrency,
 } from '@/lib/server/app-domain'
 
 const SALES_STORAGE_KEY = 'bescuit-operation-assistant:sales-daily'
+const MANUAL_EXPENSE_STORAGE_KEY = 'bescuit-operation-assistant:manual-expenses'
 const INVOICE_SESSION_STORAGE_KEY = 'bescuit-operation-assistant:invoice-jobs'
 const INVOICE_DELETED_SESSION_STORAGE_KEY =
   'bescuit-operation-assistant:deleted-invoice-jobs'
+let memoryManualExpenses: ManualExpenseRecord[] = []
 
 export { getInvoiceReadinessSummary, getMonthOptions }
 
@@ -58,6 +63,38 @@ export function upsertStoredSalesRecord(
   storedRecords.push(nextRecord)
   persistSalesRecords(storedRecords)
   return cloneSalesRecord(nextRecord)
+}
+
+export function listStoredManualExpenses(date?: string) {
+  return readManualExpenses()
+    .filter((record) => !date || record.entryDate === date)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .map(cloneManualExpenseRecord)
+}
+
+export function listStoredExpenseSupplierOptions() {
+  const supplierNames = new Set<string>()
+
+  for (const job of listStoredInvoiceJobs()) {
+    const supplierName = job.header.supplier.trim()
+    if (supplierName) {
+      supplierNames.add(supplierName)
+    }
+  }
+
+  return Array.from(supplierNames).sort((left, right) =>
+    left.localeCompare(right),
+  )
+}
+
+export function createStoredManualExpense(input: ManualExpenseDraftInput) {
+  const record = normalizeManualExpenseInput(input)
+  const storedRecords = readManualExpenses().filter(
+    (storedRecord) => storedRecord.id !== record.id,
+  )
+  storedRecords.push(record)
+  persistManualExpenses(storedRecords)
+  return cloneManualExpenseRecord(record)
 }
 
 export function listStoredInvoiceJobs() {
@@ -235,6 +272,44 @@ function persistSalesRecords(records: SalesDailyRecord[]) {
   window.localStorage.setItem(
     SALES_STORAGE_KEY,
     JSON.stringify(records.map(cloneSalesRecord)),
+  )
+}
+
+function readManualExpenses() {
+  if (!canUseLocalStorage()) {
+    return memoryManualExpenses.map(cloneManualExpenseRecord)
+  }
+
+  const rawValue = window.localStorage.getItem(MANUAL_EXPENSE_STORAGE_KEY)
+  if (!rawValue) {
+    return []
+  }
+
+  try {
+    const parsedValue = JSON.parse(rawValue)
+    if (!Array.isArray(parsedValue)) {
+      return []
+    }
+
+    return parsedValue
+      .map(toManualExpenseRecord)
+      .filter((record): record is ManualExpenseRecord => record !== null)
+      .map(cloneManualExpenseRecord)
+  } catch {
+    window.localStorage.removeItem(MANUAL_EXPENSE_STORAGE_KEY)
+    return []
+  }
+}
+
+function persistManualExpenses(records: ManualExpenseRecord[]) {
+  if (!canUseLocalStorage()) {
+    memoryManualExpenses = records.map(cloneManualExpenseRecord)
+    return
+  }
+
+  window.localStorage.setItem(
+    MANUAL_EXPENSE_STORAGE_KEY,
+    JSON.stringify(records.map(cloneManualExpenseRecord)),
   )
 }
 
@@ -522,6 +597,12 @@ function cloneSalesRecord(record: SalesDailyRecord): SalesDailyRecord {
   return { ...record }
 }
 
+function cloneManualExpenseRecord(
+  record: ManualExpenseRecord,
+): ManualExpenseRecord {
+  return { ...record }
+}
+
 function toSalesDailyRecord(value: unknown): SalesDailyRecord | null {
   if (!isRecord(value)) {
     return null
@@ -560,6 +641,46 @@ function toSalesDailyRecord(value: unknown): SalesDailyRecord | null {
     status: isSalesRecordStatus(value.status) ? value.status : 'submitted',
     note,
     updatedAt,
+  }
+}
+
+function toManualExpenseRecord(value: unknown): ManualExpenseRecord | null {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  const hasBaseShape =
+    typeof value.id === 'string' &&
+    typeof value.entryDate === 'string' &&
+    typeof value.amount === 'number' &&
+    typeof value.vendor === 'string' &&
+    typeof value.note === 'string' &&
+    typeof value.sourceId === 'string' &&
+    typeof value.createdAt === 'string'
+
+  if (!hasBaseShape) {
+    return null
+  }
+
+  const id = value.id as string
+  const entryDate = value.entryDate as string
+  const amount = value.amount as number
+  const vendor = value.vendor as string
+  const note = value.note as string
+  const sourceId = value.sourceId as string
+  const createdAt = value.createdAt as string
+
+  return {
+    id,
+    entryDate,
+    entryType: 'expense',
+    category: 'manual',
+    amount,
+    vendor,
+    note,
+    sourceKind: 'manual',
+    sourceId,
+    createdAt,
   }
 }
 

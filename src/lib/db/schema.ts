@@ -162,6 +162,7 @@ export const ledgerEntries = sqliteTable(
     amount: real('amount').notNull(),
     account: text('account'),
     vendor: text('vendor'),
+    note: text('note').notNull().default(''),
     sourceKind: text('source_kind').notNull(),
     sourceId: text('source_id').notNull(),
     createdAt: text('created_at')
