@@ -1,10 +1,13 @@
 import type { IngredientOption } from '@/lib/server/app-domain'
 import {
+  createStoredManualExpense,
   createStoredInvoiceJob,
   deleteStoredInvoiceJob,
   getStoredInvoiceJob,
   getStoredSalesRecord,
+  listStoredExpenseSupplierOptions,
   listStoredInvoiceJobs,
+  listStoredManualExpenses,
   listStoredSalesRecords,
   upsertStoredInvoiceJob,
   upsertStoredSalesRecord,
@@ -20,11 +23,14 @@ export const demoIngredientOptions: IngredientOption[] = [
 ]
 
 export {
+  createStoredManualExpense,
   createStoredInvoiceJob,
   deleteStoredInvoiceJob,
   getStoredInvoiceJob,
   getStoredSalesRecord,
+  listStoredExpenseSupplierOptions,
   listStoredInvoiceJobs,
+  listStoredManualExpenses,
   listStoredSalesRecords,
   upsertStoredInvoiceJob,
   upsertStoredSalesRecord,

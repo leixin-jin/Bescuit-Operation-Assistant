@@ -32,6 +32,32 @@ export interface SalesTotalEntryInput {
   caixa: string
 }
 
+export interface ManualExpenseDraftInput {
+  date: string
+  supplierName: string
+  amount: string
+  note: string
+}
+
+export interface ManualExpenseRecord {
+  id: string
+  entryDate: string
+  entryType: 'expense'
+  category: 'manual'
+  amount: number
+  vendor: string
+  note: string
+  sourceKind: 'manual'
+  sourceId: string
+  createdAt: string
+}
+
+export interface ExpenseEntryPageData {
+  date: string
+  supplierOptions: string[]
+  recentExpenses: ManualExpenseRecord[]
+}
+
 export type InvoiceJobStatus = 'uploaded' | 'needs_review' | 'ready' | 'error'
 
 export type InvoiceIntakeStage =
@@ -255,6 +281,47 @@ export function normalizeSalesDraftInput(
   }
 }
 
+export function normalizeManualExpenseInput(
+  input: ManualExpenseDraftInput,
+  createdAt?: string,
+): ManualExpenseRecord {
+  const resolvedCreatedAt = createdAt ?? new Date().toISOString()
+  const entryDate = input.date.trim()
+  const vendor = input.supplierName.trim()
+  const amount = parseCurrencyAmount(input.amount)
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(entryDate)) {
+    throw new Error('日期格式无效')
+  }
+
+  if (!vendor) {
+    throw new Error('供应商不能为空')
+  }
+
+  if (amount <= 0) {
+    throw new Error('支出金额必须大于 0')
+  }
+
+  const idSuffix =
+    createdAt === undefined
+      ? `${getManualExpenseIdSuffix(resolvedCreatedAt)}-${globalThis.crypto.randomUUID()}`
+      : getManualExpenseIdSuffix(resolvedCreatedAt)
+  const id = `manual-expense-${entryDate}-${idSuffix}`
+
+  return {
+    id,
+    entryDate,
+    entryType: 'expense',
+    category: 'manual',
+    amount,
+    vendor,
+    note: input.note.trim(),
+    sourceKind: 'manual',
+    sourceId: id,
+    createdAt: resolvedCreatedAt,
+  }
+}
+
 export function deriveSalesChannelAmounts(
   input: SalesTotalEntryInput,
 ): Record<PaymentChannelId, string> {
@@ -330,6 +397,13 @@ function normalizeDecimalString(value: string) {
 
 function formatSalesPayloadAmount(value: number) {
   return roundCurrency(value).toFixed(2)
+}
+
+function getManualExpenseIdSuffix(createdAt: string) {
+  return createdAt
+    .slice(11, 23)
+    .replace(/\D/g, '')
+    .padEnd(10, '0')
 }
 
 function getMissingRequiredHeaderFields(header: InvoiceHeaderDraft) {
