@@ -142,7 +142,7 @@ function AnalyticsCalendarPage() {
 
             <div className="grid grid-cols-7 gap-1">
               {Array.from({ length: startDay }).map((_, index) => (
-                <div key={`empty-${index}`} className="h-14 p-1 sm:h-16 xl:h-[4.5rem]" />
+                <div key={`empty-${index}`} className="h-16 p-1 sm:h-20 xl:h-24" />
               ))}
 
               {Array.from({ length: daysInMonth }).map((_, index) => {
@@ -156,30 +156,31 @@ function AnalyticsCalendarPage() {
                 return (
                   <div
                     key={day}
+                    data-testid={`calendar-day-${day}`}
                     className={cn(
-                      'h-14 cursor-pointer rounded-lg border border-transparent p-1.5 transition-colors hover:border-primary/20 hover:bg-secondary/50 sm:h-16 xl:h-[4.5rem]',
+                      'h-16 cursor-pointer rounded-lg border border-transparent p-1.5 transition-colors hover:border-primary/20 hover:bg-secondary/50 sm:h-20 xl:h-24',
                       isToday && 'border-primary bg-primary/5',
                     )}
                   >
-                    <div className="grid h-full grid-cols-[1.5rem_minmax(0,1fr)] gap-1">
+                    <div className="flex h-full min-w-0 flex-col items-center justify-start gap-1 text-center">
                       <span className={cn('text-sm font-semibold', isToday && 'text-primary')}>
                         {day}
                       </span>
                       {dayData ? (
-                        <div className="min-w-0 space-y-0.5 justify-self-end text-right leading-tight">
-                          <div className="flex min-w-0 items-center justify-end gap-1">
+                        <>
+                          <div className="flex max-w-full min-w-0 items-center justify-center gap-1 leading-tight">
                             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
                             <span className="truncate text-xs text-emerald-600">
                               {dayData.income}
                             </span>
                           </div>
-                          <div className="flex min-w-0 items-center justify-end gap-1">
+                          <div className="flex max-w-full min-w-0 items-center justify-center gap-1 leading-tight">
                             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-400" />
                             <span className="truncate text-xs text-red-500">
                               {dayData.expense}
                             </span>
                           </div>
-                        </div>
+                        </>
                       ) : null}
                     </div>
                   </div>

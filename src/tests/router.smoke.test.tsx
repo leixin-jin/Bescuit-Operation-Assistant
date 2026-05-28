@@ -238,6 +238,46 @@ describe('phase 1-4 smoke tests', () => {
     expect(screen.getByText('本月净利润')).toBeTruthy()
   })
 
+  test('calendar day cells stack date, income, and expense vertically', async () => {
+    analyticsMocks.getCalendarAnalyticsSummaryServerFn.mockImplementation(async (input) => {
+      const selectedMonth =
+        input?.data?.month ??
+        new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Madrid' })
+          .format(new Date())
+          .slice(0, 7)
+
+      return {
+        selectedMonth,
+        monthName: `日历标题 ${selectedMonth}`,
+        monthOptions: [],
+        days: {
+          '4': {
+            income: 1358,
+            expense: 0,
+          },
+        },
+        totalIncome: 0,
+        totalExpense: 0,
+      }
+    })
+
+    await renderRoute('/analytics/calendar')
+
+    const dayCell = screen.getByTestId('calendar-day-4')
+
+    await waitFor(() => {
+      const dayContent = dayCell.firstElementChild
+      const rows = Array.from(dayContent?.children ?? [])
+
+      expect(dayContent?.className).toContain('flex-col')
+      expect(dayContent?.className).not.toContain('grid-cols')
+      expect(rows).toHaveLength(3)
+      expect(rows[0]?.textContent).toBe('4')
+      expect(rows[1]?.textContent).toContain('1358')
+      expect(rows[2]?.textContent).toContain('0')
+    })
+  })
+
   test('monthly analytics exposes separate year and month selectors', async () => {
     await renderRoute('/analytics/monthly')
 
