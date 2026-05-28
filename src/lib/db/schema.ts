@@ -10,13 +10,17 @@ export const sourceDocuments = sqliteTable(
     r2Key: text('r2_key'),
     originalFilename: text('original_filename').notNull(),
     mimeType: text('mime_type'),
+    contentHash: text('content_hash'),
     uploadedBy: text('uploaded_by'),
     status: text('status').notNull().default('uploaded'),
     uploadedAt: text('uploaded_at')
       .notNull()
       .default(sql`CURRENT_TIMESTAMP`),
   },
-  (table) => [index('source_documents_uploaded_at_idx').on(table.uploadedAt)],
+  (table) => [
+    index('source_documents_uploaded_at_idx').on(table.uploadedAt),
+    uniqueIndex('source_documents_content_hash_unique_idx').on(table.contentHash),
+  ],
 )
 
 export const intakeJobs = sqliteTable(
@@ -107,6 +111,7 @@ export const invoices = sqliteTable(
     invoiceDate: text('invoice_date').notNull(),
     supplierName: text('supplier_name').notNull(),
     documentNumber: text('document_number').notNull(),
+    dedupeKey: text('dedupe_key'),
     subtotalAmount: real('subtotal_amount'),
     taxAmount: real('tax_amount').notNull().default(0),
     totalAmount: real('total_amount').notNull(),
@@ -125,6 +130,7 @@ export const invoices = sqliteTable(
     index('invoices_invoice_date_idx').on(table.invoiceDate),
     index('invoices_review_status_idx').on(table.reviewStatus),
     uniqueIndex('invoices_intake_job_unique_idx').on(table.intakeJobId),
+    uniqueIndex('invoices_dedupe_key_unique_idx').on(table.dedupeKey),
   ],
 )
 

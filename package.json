@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vite dev --port 3000",
     "build": "vite build",
+    "postbuild": "test ! -f dist/server/.dev.vars",
     "preview": "vite preview",
     "test": "vitest run",
     "smoke": "vitest run src/tests/router.smoke.test.tsx src/tests/sales-boundary.test.ts src/tests/invoice-intake-rehydration.test.tsx src/tests/invoice-review-rehydration.test.tsx",

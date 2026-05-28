@@ -122,6 +122,94 @@ describe('invoice mock store', () => {
     ])
   })
 
+  test('invalid invoice dates block ready status', async () => {
+    const createdJob = await createInvoiceJob('metro-upload.pdf')
+
+    await saveInvoiceJob({
+      ...createdJob,
+      lineItems: createdJob.lineItems.map((item, index) => ({
+        ...item,
+        ingredient: index === 0 ? 'coke-330' : 'lime',
+        matched: true,
+        unitPrice: '1.50',
+      })),
+      header: {
+        supplier: 'Makro Madrid',
+        invoiceNo: 'MK-889120',
+        date: '2026-99-99',
+        totalAmount: '248.90',
+        taxAmount: '34.56',
+        notes: '',
+      },
+    })
+
+    const storedJob = await getInvoiceJob(createdJob.jobId)
+
+    expect(storedJob?.status).toBe('needs_review')
+    expect(getInvoiceReadinessSummary(storedJob!).invalidHeaderFields).toContain(
+      '发票日期',
+    )
+  })
+
+  test('tax larger than total blocks ready status', async () => {
+    const createdJob = await createInvoiceJob('metro-upload.pdf')
+
+    await saveInvoiceJob({
+      ...createdJob,
+      lineItems: createdJob.lineItems.map((item, index) => ({
+        ...item,
+        ingredient: index === 0 ? 'coke-330' : 'lime',
+        matched: true,
+        unitPrice: '1.50',
+      })),
+      header: {
+        supplier: 'Makro Madrid',
+        invoiceNo: 'MK-889120',
+        date: '2026-04-24',
+        totalAmount: '20.00',
+        taxAmount: '21.00',
+        notes: '',
+      },
+    })
+
+    const storedJob = await getInvoiceJob(createdJob.jobId)
+
+    expect(storedJob?.status).toBe('needs_review')
+    expect(getInvoiceReadinessSummary(storedJob!).invalidHeaderFields).toContain(
+      '税额不能大于总金额',
+    )
+  })
+
+  test('invalid line item numbers block ready status', async () => {
+    const createdJob = await createInvoiceJob('metro-upload.pdf')
+
+    await saveInvoiceJob({
+      ...createdJob,
+      lineItems: createdJob.lineItems.map((item, index) => ({
+        ...item,
+        qty: index === 0 ? '-2' : item.qty,
+        ingredient: index === 0 ? 'coke-330' : 'lime',
+        matched: true,
+        unitPrice: '1.50',
+      })),
+      header: {
+        supplier: 'Makro Madrid',
+        invoiceNo: 'MK-889120',
+        date: '2026-04-24',
+        totalAmount: '248.90',
+        taxAmount: '34.56',
+        notes: '',
+      },
+    })
+
+    const storedJob = await getInvoiceJob(createdJob.jobId)
+
+    expect(storedJob?.status).toBe('needs_review')
+    expect(getInvoiceReadinessSummary(storedJob!).invalidHeaderFields).toContain(
+      '明细金额',
+    )
+  })
+
   test('unfinished jobs can be deleted from the browser session store', async () => {
     const createdJob = await createInvoiceJob('delete-me.pdf')
 

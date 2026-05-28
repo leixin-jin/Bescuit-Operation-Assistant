@@ -5,13 +5,18 @@ import { processInvoiceIntakeQueueMessage } from '@/lib/server/extraction'
 import { getInvoiceDocumentPreviewResponse } from '@/lib/server/queries/document-preview'
 import {
   isInvoiceIntakeQueueMessage,
-  MAX_QUEUE_CONSUMER_ATTEMPTS,
   QUEUE_RETRY_DELAY_SECONDS,
   type InvoiceIntakeQueueMessage,
 } from '@/lib/server/queue'
 
 export default {
   fetch(request: Request, env: AppBindings, ctx: ExecutionContext) {
+    const authResponse = requireAppBasicAuth(request, env as Partial<Env>)
+
+    if (authResponse) {
+      return authResponse
+    }
+
     const url = new URL(request.url)
     const documentPreviewPrefix = '/api/invoice-document-preview/'
 
@@ -60,15 +65,40 @@ export default {
           error: error instanceof Error ? error.message : 'Unknown queue error',
         })
 
-        if (message.attempts >= MAX_QUEUE_CONSUMER_ATTEMPTS) {
-          message.ack()
-          continue
-        }
-
         message.retry({
           delaySeconds: QUEUE_RETRY_DELAY_SECONDS,
         })
       }
     }
   },
+}
+
+function requireAppBasicAuth(request: Request, env: Partial<Env>) {
+  const user = env.APP_BASIC_AUTH_USER
+  const password = env.APP_BASIC_AUTH_PASSWORD
+  const shouldRequireAuth = env.MODE === 'production' || Boolean(user || password)
+
+  if (!shouldRequireAuth) {
+    return null
+  }
+
+  if (!user || !password) {
+    return new Response('Application auth is not configured', { status: 500 })
+  }
+
+  const [scheme, credentials] = request.headers.get('Authorization')?.split(' ') ?? []
+
+  if (
+    scheme?.toLowerCase() === 'basic' &&
+    credentials === btoa(`${user}:${password}`)
+  ) {
+    return null
+  }
+
+  return new Response('Authentication required', {
+    status: 401,
+    headers: {
+      'WWW-Authenticate': 'Basic realm="Bescuit Operation Assistant"',
+    },
+  })
 }

@@ -5,6 +5,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "main": "./src/server.ts",
   "vars": {
+    "MODE": "production",
     "INVOICE_EXTRACTION_PROVIDER": "gemini",
     "INVOICE_EXTRACTION_MODEL": "gemini-3.5-flash",
     "INVOICE_PDF_INPUT_MODE": "native-pdf"

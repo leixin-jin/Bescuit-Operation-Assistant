@@ -44,6 +44,10 @@ interface RecheckSourceRow {
   uploadedAt: string
 }
 
+interface InvoiceIdRow {
+  id: string
+}
+
 interface IntakeStageRow {
   stage: string
 }
@@ -648,62 +652,159 @@ async function writeConfirmedInvoiceAccounting(
   const db = requireD1Database(env, 'invoice accounting')
   await assertInvoiceReviewDraftWritable(db, job.jobId)
   const sourceDocumentId = await getSourceDocumentId(db, job.jobId)
-  const invoiceId = getInvoiceId(job.jobId)
-  const ledgerEntryId = getLedgerEntryId(invoiceId)
+  const preferredInvoiceId = getInvoiceId(job.jobId)
+  const invoiceDedupeKey = getInvoiceDedupeKey(job)
   const totalAmount = parseCurrencyAmount(job.header.totalAmount)
   const taxAmount = parseCurrencyAmount(job.header.taxAmount)
   const subtotalAmount = roundCurrency(totalAmount - taxAmount)
   const now = new Date().toISOString()
-  const invoiceUpsertResult = await db
-    .prepare(
-      `/* invoice:upsert-invoice */
-      INSERT INTO invoices (
-        id,
-        intake_job_id,
-        invoice_date,
-        supplier_name,
-        document_number,
-        subtotal_amount,
-        tax_amount,
-        total_amount,
-        source_document_id,
-        review_status,
-        updated_at
-      )
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?
-      WHERE EXISTS (
-        SELECT 1
-        FROM intake_jobs
-        WHERE intake_jobs.id = ?
-          AND intake_jobs.stage = 'ready'
-      )
-      ON CONFLICT(id) DO UPDATE SET
-        invoice_date = excluded.invoice_date,
-        supplier_name = excluded.supplier_name,
-        document_number = excluded.document_number,
-        subtotal_amount = excluded.subtotal_amount,
-        tax_amount = excluded.tax_amount,
-        total_amount = excluded.total_amount,
-        source_document_id = excluded.source_document_id,
-        review_status = excluded.review_status,
-        updated_at = excluded.updated_at`,
-    )
-    .bind(
-      invoiceId,
-      job.jobId,
-      job.header.date,
-      job.header.supplier.trim(),
-      job.header.invoiceNo.trim(),
-      subtotalAmount,
-      taxAmount,
-      totalAmount,
-      sourceDocumentId,
-      now,
-      job.jobId,
-    )
-    .run()
+  const existingInvoiceId = await getSameJobInvoiceId(db, job.jobId)
+  let persistedInvoiceId = existingInvoiceId
 
-  assertInvoiceMutationChanged(invoiceUpsertResult, '发票任务正在删除，不能保存或确认。')
+  if (persistedInvoiceId) {
+    const targetInvoiceId = await getInvoiceIdByDedupeKey(db, invoiceDedupeKey)
+
+    if (targetInvoiceId && targetInvoiceId !== persistedInvoiceId) {
+      await deleteRetiredInvoiceAccounting(db, job.jobId, persistedInvoiceId)
+      persistedInvoiceId = targetInvoiceId
+    }
+
+    const invoiceUpdateResult = await db
+      .prepare(
+        targetInvoiceId && targetInvoiceId === persistedInvoiceId
+          ? `/* invoice:merge-into-existing-dedupe */
+        UPDATE invoices
+        SET
+          intake_job_id = ?,
+          invoice_date = ?,
+          supplier_name = ?,
+          document_number = ?,
+          subtotal_amount = ?,
+          tax_amount = ?,
+          total_amount = ?,
+          source_document_id = ?,
+          dedupe_key = ?,
+          review_status = 'ready',
+          updated_at = ?
+        WHERE id = ?
+          AND EXISTS (
+            SELECT 1
+            FROM intake_jobs
+            WHERE intake_jobs.id = ?
+              AND intake_jobs.stage = 'ready'
+          )`
+          : `/* invoice:update-existing-invoice */
+        UPDATE invoices
+        SET
+          intake_job_id = ?,
+          invoice_date = ?,
+          supplier_name = ?,
+          document_number = ?,
+          subtotal_amount = ?,
+          tax_amount = ?,
+          total_amount = ?,
+          source_document_id = ?,
+          dedupe_key = ?,
+          review_status = 'ready',
+          updated_at = ?
+        WHERE id = ?
+          AND intake_job_id = ?
+          AND EXISTS (
+            SELECT 1
+            FROM intake_jobs
+            WHERE intake_jobs.id = ?
+              AND intake_jobs.stage = 'ready'
+          )`,
+      )
+      .bind(
+        job.jobId,
+        job.header.date,
+        job.header.supplier.trim(),
+        job.header.invoiceNo.trim(),
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+        sourceDocumentId,
+        invoiceDedupeKey,
+        now,
+        persistedInvoiceId,
+        ...(targetInvoiceId && targetInvoiceId === persistedInvoiceId
+          ? [job.jobId]
+          : [job.jobId, job.jobId]),
+      )
+      .run()
+
+    assertInvoiceMutationChanged(
+      invoiceUpdateResult,
+      '发票任务正在删除，不能保存或确认。',
+    )
+  } else {
+    const invoiceId = await getAvailableInvoiceId(
+      db,
+      preferredInvoiceId,
+      invoiceDedupeKey,
+    )
+    const invoiceUpsertResult = await db
+      .prepare(
+        `/* invoice:upsert-invoice */
+        INSERT INTO invoices (
+          id,
+          intake_job_id,
+          invoice_date,
+          supplier_name,
+          document_number,
+          subtotal_amount,
+          tax_amount,
+          total_amount,
+          source_document_id,
+          dedupe_key,
+          review_status,
+          updated_at
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?
+        WHERE EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'ready'
+        )
+        ON CONFLICT(dedupe_key) DO UPDATE SET
+          intake_job_id = excluded.intake_job_id,
+          invoice_date = excluded.invoice_date,
+          supplier_name = excluded.supplier_name,
+          document_number = excluded.document_number,
+          subtotal_amount = excluded.subtotal_amount,
+          tax_amount = excluded.tax_amount,
+          total_amount = excluded.total_amount,
+          source_document_id = excluded.source_document_id,
+          review_status = excluded.review_status,
+          updated_at = excluded.updated_at`,
+      )
+      .bind(
+        invoiceId,
+        job.jobId,
+        job.header.date,
+        job.header.supplier.trim(),
+        job.header.invoiceNo.trim(),
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+        sourceDocumentId,
+        invoiceDedupeKey,
+        now,
+        job.jobId,
+      )
+      .run()
+
+    assertInvoiceMutationChanged(
+      invoiceUpsertResult,
+      '发票任务正在删除，不能保存或确认。',
+    )
+
+    persistedInvoiceId = await getPersistedInvoiceId(db, invoiceDedupeKey)
+  }
+
+  const ledgerEntryId = getLedgerEntryId(persistedInvoiceId)
 
   const statements: D1PreparedStatement[] = [
     db
@@ -712,7 +813,7 @@ async function writeConfirmedInvoiceAccounting(
         DELETE FROM invoice_items
         WHERE invoice_id = ?`,
       )
-      .bind(invoiceId),
+      .bind(persistedInvoiceId),
     ...job.lineItems.map((item, index) =>
       db
         .prepare(
@@ -734,8 +835,8 @@ async function writeConfirmedInvoiceAccounting(
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
-          getInvoiceItemId(invoiceId, index),
-          invoiceId,
+          getInvoiceItemId(persistedInvoiceId, index),
+          persistedInvoiceId,
           item.name.trim(),
           parseOptionalCurrencyAmount(item.qty),
           item.unit.trim() || null,
@@ -775,7 +876,7 @@ async function writeConfirmedInvoiceAccounting(
         job.header.date,
         totalAmount,
         job.header.supplier.trim(),
-        invoiceId,
+        persistedInvoiceId,
         now,
       ),
   ]
@@ -836,6 +937,140 @@ async function getSourceDocumentId(db: D1Database, jobId: string) {
   return sourceDocumentId
 }
 
+async function getPersistedInvoiceId(db: D1Database, dedupeKey: string) {
+  const invoiceId = await getInvoiceIdByDedupeKey(db, dedupeKey)
+
+  if (!invoiceId) {
+    throw new Error(`Confirmed invoice was not persisted: ${dedupeKey}`)
+  }
+
+  return invoiceId
+}
+
+async function getInvoiceIdByDedupeKey(db: D1Database, dedupeKey: string) {
+  const rows = await allD1<InvoiceIdRow>(
+    db,
+    `/* invoice:get-persisted-invoice-id */
+    SELECT id
+    FROM invoices
+    WHERE dedupe_key = ?
+    LIMIT 1`,
+    [dedupeKey],
+  )
+  const invoiceId = rows[0]?.id
+
+  return invoiceId ?? null
+}
+
+async function getSameJobInvoiceId(db: D1Database, jobId: string) {
+  const rows = await allD1<InvoiceIdRow>(
+    db,
+    `/* invoice:resolve-existing-invoice */
+    SELECT id
+    FROM invoices
+    WHERE intake_job_id = ?
+    LIMIT 1`,
+    [jobId],
+  )
+
+  return rows[0]?.id ?? null
+}
+
+async function deleteRetiredInvoiceAccounting(
+  db: D1Database,
+  jobId: string,
+  invoiceId: string,
+) {
+  await db
+    .prepare(
+      `/* invoice:delete-retired-ledger */
+      DELETE FROM ledger_entries
+      WHERE source_kind = 'invoice'
+        AND source_id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'ready'
+        )`,
+    )
+    .bind(invoiceId, jobId)
+    .run()
+
+  await db
+    .prepare(
+      `/* invoice:delete-retired-items */
+      DELETE FROM invoice_items
+      WHERE invoice_id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'ready'
+        )`,
+    )
+    .bind(invoiceId, jobId)
+    .run()
+
+  const invoiceDeleteResult = await db
+    .prepare(
+      `/* invoice:delete-retired-invoice */
+      DELETE FROM invoices
+      WHERE id = ?
+        AND intake_job_id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = ?
+            AND intake_jobs.stage = 'ready'
+        )`,
+    )
+    .bind(invoiceId, jobId, jobId)
+    .run()
+
+  assertInvoiceMutationChanged(
+    invoiceDeleteResult,
+    '发票任务正在删除，不能保存或确认。',
+  )
+}
+
+async function getAvailableInvoiceId(
+  db: D1Database,
+  preferredInvoiceId: string,
+  dedupeKey: string,
+) {
+  const hash = getStableInvoiceKeyHash(dedupeKey)
+
+  for (let suffix = 0; suffix < 20; suffix += 1) {
+    const candidate =
+      suffix === 0
+        ? preferredInvoiceId
+        : suffix === 1
+          ? `${preferredInvoiceId}_${hash}`
+          : `${preferredInvoiceId}_${hash}_${suffix}`
+
+    if (!(await invoiceIdExists(db, candidate))) {
+      return candidate
+    }
+  }
+
+  throw new Error(`Could not allocate invoice id for job invoice ${preferredInvoiceId}`)
+}
+
+async function invoiceIdExists(db: D1Database, invoiceId: string) {
+  const rows = await allD1<InvoiceIdRow>(
+    db,
+    `/* invoice:get-invoice-id */
+    SELECT id
+    FROM invoices
+    WHERE id = ?
+    LIMIT 1`,
+    [invoiceId],
+  )
+
+  return Boolean(rows[0]?.id)
+}
+
 async function assertInvoiceReviewDraftWritable(db: D1Database, jobId: string) {
   const rows = await allD1<IntakeStageRow>(
     db,
@@ -871,6 +1106,25 @@ function calculateLineTotal(quantity: string, unitPrice: string) {
 
 function getInvoiceId(jobId: string) {
   return `inv_${jobId}`
+}
+
+function getInvoiceDedupeKey(job: InvoiceReviewJob) {
+  return [
+    job.header.supplier.trim().toLowerCase(),
+    job.header.invoiceNo.trim(),
+    job.header.date.trim(),
+  ].join('|')
+}
+
+function getStableInvoiceKeyHash(value: string) {
+  let hash = 2166136261
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+
+  return (hash >>> 0).toString(36)
 }
 
 function getInvoiceItemId(invoiceId: string, index: number) {

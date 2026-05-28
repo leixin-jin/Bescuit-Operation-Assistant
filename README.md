@@ -23,6 +23,10 @@ pnpm smoke
 - `pnpm cf-typegen` 根据 `wrangler.jsonc` 生成 `src/lib/env.d.ts`。
 - `pnpm smoke` 覆盖 Phase 8 的最小页面流：首页/路由、营业额录入边界、票据 intake/review rehydration、月分析和日历页面。
 
+### Build Artifact Secret Guard
+
+`pnpm build` runs a postbuild check that fails if `dist/server/.dev.vars` exists. If the check fails, remove that generated file and keep runtime secrets in `.dev.vars` locally or Wrangler secrets remotely.
+
 ## Cloudflare 资源
 
 `wrangler.jsonc` 依赖以下 Cloudflare bindings：
@@ -50,7 +54,22 @@ pnpm smoke
 wrangler secret put GEMINI_API_KEY
 ```
 
+### Production Access Gate
+
+Production requires Basic Auth at the Worker entry point. Set both secrets before exposing the app:
+
+```bash
+wrangler secret put APP_BASIC_AUTH_USER
+wrangler secret put APP_BASIC_AUTH_PASSWORD
+```
+
+`wrangler.jsonc` sets `MODE=production` for deployed Workers. When `MODE=production`, missing auth secrets return HTTP 500 so the app cannot be accidentally published without an access gate.
+
 Queue 抽取流程直接把 R2 中的 PDF/图片 bytes 传给 provider，并校验 `invoice-extraction-v2` JSON schema；不会再调用 Workers AI `toMarkdown()` 作为生产抽取路径。
+
+### Duplicate Invoice Behavior
+
+Uploading the same file bytes reuses the existing invoice intake job and does not enqueue another extraction job. Confirming two jobs with the same supplier, document number, and invoice date updates the same invoice, invoice items, and ledger entry instead of double-counting expenses.
 
 已创建的资源：
 
@@ -63,7 +82,9 @@ Queue 抽取流程直接把 R2 中的 PDF/图片 bytes 传给 provider，并校�
 首次部署前执行远程 D1 schema 初始化：
 
 ```bash
-pnpm cf:migrate:remote
+wrangler d1 execute bescuit-operation-assistant-db --remote --file migrations/0001_initial.sql
+wrangler d1 execute bescuit-operation-assistant-db --remote --file migrations/0002_real_data_constraints_and_ingredients.sql
+wrangler d1 execute bescuit-operation-assistant-db --remote --file migrations/0003_invoice_idempotency_and_auth.sql
 ```
 
 ## 部署
@@ -76,7 +97,7 @@ pnpm deploy
 
 - `wrangler.jsonc` 的 D1 `database_id` 是真实 ID。
 - R2 已启用并创建 `bescuit-operation-assistant-raw-documents`。
-- D1 已执行 `migrations/0001_initial.sql`。
+- D1 已按顺序执行 `migrations/0001_initial.sql`、`migrations/0002_real_data_constraints_and_ingredients.sql`、`migrations/0003_invoice_idempotency_and_auth.sql`。
 - Queue 与 DLQ 已创建并与 `wrangler.jsonc` 中的名称一致。
 
 ## 原型目录

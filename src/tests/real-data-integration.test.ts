@@ -27,6 +27,7 @@ import {
 } from '@/lib/server/mutations/invoices.rpc'
 import { processInvoiceIntakeQueueMessage } from '@/lib/server/extraction'
 import { assertDemoDataEnabled } from '@/lib/server/runtime-config'
+import { uploadInvoiceSourceDocument } from '@/lib/server/upload'
 
 describe('real data integration boundaries', () => {
   test('production business data modules do not import fallback-store directly', () => {
@@ -212,6 +213,499 @@ describe('dashboard and analytics D1 integration', () => {
     expect(summary.pendingInvoiceCount).toBe(1)
     expect(summary.monthlyInvoiceCount).toBe(1)
     expect(summary.monthlyExpenseTotal).toBe(88)
+  })
+})
+
+describe('invoice upload D1 integration', () => {
+  test('uploading identical file bytes reuses the existing intake job', async () => {
+    const { env, tables } = createFakeD1Env()
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const first = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['same-invoice-bytes'], 'invoice-a.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+    const second = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['same-invoice-bytes'], 'invoice-b.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(second).toEqual(first)
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(await env.RAW_DOCUMENTS.get(first.r2Key)).not.toBeNull()
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(1)
+  })
+
+  test('uploading identical file bytes recovers when the source hash insert races an active job', async () => {
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [
+          createSourceDocumentRow({
+            id: 'src-race-upload',
+            r2_key: 'raw-documents/2026/04/src-race-upload-invoice.pdf',
+            content_hash:
+              '12b3ba3abd0e3d9eb59c1e2804c29c15aa0eecb56a9db564214dcf59e2d05b92',
+          }),
+        ],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-race-upload',
+            source_document_id: 'src-race-upload',
+            stage: 'deleting',
+          }),
+        ],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (sql.includes('insert into "source_documents"')) {
+            currentTables.intake_jobs[0].stage = 'queued'
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-race-upload-invoice.pdf': {
+        body: 'race-invoice-bytes',
+        contentType: 'application/pdf',
+      },
+    })
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['race-invoice-bytes'], 'invoice-race.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result).toEqual({
+      jobId: 'job-race-upload',
+      sourceDocumentId: 'src-race-upload',
+      r2Key: 'raw-documents/2026/04/src-race-upload-invoice.pdf',
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(0)
+  })
+
+  test('uploading identical file bytes rejects while the existing intake job is deleting', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-deleting-upload',
+          r2_key: 'raw-documents/2026/04/src-deleting-upload-invoice.pdf',
+          content_hash:
+            '0c8583d7b3069dfdbd0d3e3242580061094ca854eaaf7023ba62e982fd4ef44c',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-deleting-upload',
+          source_document_id: 'src-deleting-upload',
+          stage: 'deleting',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    await expect(
+      uploadInvoiceSourceDocument({
+        env,
+        file: new File(['deleting-invoice-bytes'], 'invoice-deleting.pdf', {
+          type: 'application/pdf',
+        }),
+      }),
+    ).rejects.toThrow(/delet/i)
+
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-deleting-upload',
+      stage: 'deleting',
+    })
+    expect(tables.source_documents[0].r2_key).toBe(
+      'raw-documents/2026/04/src-deleting-upload-invoice.pdf',
+    )
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(0)
+  })
+
+  test('uploading identical file bytes reuses an error job when requeueing the existing source', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-error-upload',
+          r2_key: 'raw-documents/2026/04/src-error-upload-invoice.pdf',
+          content_hash:
+            'b6a8bde8e5eb8b31b8e234613e171ed35db55093907fcf29ac2201b6e4c17f06',
+          status: 'error',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-error-upload',
+          source_document_id: 'src-error-upload',
+          stage: 'error',
+          error_message: 'Queue unavailable',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-error-upload-invoice.pdf': {
+        body: 'errored-invoice-bytes',
+        contentType: 'application/pdf',
+      },
+    })
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['errored-invoice-bytes'], 'invoice-retry.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result.sourceDocumentId).toBe('src-error-upload')
+    expect(result.r2Key).toBe('raw-documents/2026/04/src-error-upload-invoice.pdf')
+    expect(result.jobId).toBe('job-error-upload')
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.source_documents[0].status).toBe('uploaded')
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-error-upload',
+      source_document_id: 'src-error-upload',
+      stage: 'queued',
+      error_message: null,
+    })
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toEqual([
+      {
+        jobId: result.jobId,
+        sourceDocumentId: 'src-error-upload',
+        r2Key: 'raw-documents/2026/04/src-error-upload-invoice.pdf',
+        fileName: 'invoice.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      },
+    ])
+  })
+
+  test('uploading identical file bytes reuses the active job when normal job insert loses the source-row race', async () => {
+    const { env, tables } = createFakeD1Env(
+      {},
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (
+            sql.includes('invoice-upload:insert-job-if-no-active') &&
+            currentTables.intake_jobs.length === 0
+          ) {
+            const sourceDocument = currentTables.source_documents[0]
+
+            if (sourceDocument) {
+              currentTables.intake_jobs.push(
+                createIntakeJobRow({
+                  id: 'job-race-winner',
+                  source_document_id: sourceDocument.id,
+                  stage: 'queued',
+                }),
+              )
+            }
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['new-race-invoice-bytes'], 'invoice-race.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result).toEqual({
+      jobId: 'job-race-winner',
+      sourceDocumentId: tables.source_documents[0].id,
+      r2Key: tables.source_documents[0].r2_key,
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(0)
+  })
+
+  test('uploading identical file bytes recovers a duplicate even when cleanup delete fails', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-cleanup-fail',
+          r2_key: 'raw-documents/2026/04/src-cleanup-fail-invoice.pdf',
+          content_hash:
+            '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-cleanup-fail',
+          source_document_id: 'src-cleanup-fail',
+          stage: 'queued',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket(
+      {
+        'raw-documents/2026/04/src-cleanup-fail-invoice.pdf': {
+          body: '1234',
+          contentType: 'application/pdf',
+        },
+      },
+      { failDelete: true },
+    )
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['1234'], 'invoice-cleanup.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result).toEqual({
+      jobId: 'job-cleanup-fail',
+      sourceDocumentId: 'src-cleanup-fail',
+      r2Key: 'raw-documents/2026/04/src-cleanup-fail-invoice.pdf',
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(0)
+  })
+
+  test('uploading identical file bytes heals a missing old R2 object before retrying an error job', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-missing-old-object',
+          r2_key: 'raw-documents/2026/04/src-missing-old-object-invoice.pdf',
+          content_hash:
+            'cbc61c4e48ac37759a3d8e9ac7e0e57b755b97c8dfa7342f58ea1c41348dfaee',
+          status: 'error',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-missing-old-object',
+          source_document_id: 'src-missing-old-object',
+          stage: 'error',
+          error_message: 'R2 object not found',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['missing-old-object-bytes'], 'invoice-retry.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result.jobId).toBe('job-missing-old-object')
+    expect(result.sourceDocumentId).toBe('src-missing-old-object')
+    expect(result.r2Key).not.toBe(
+      'raw-documents/2026/04/src-missing-old-object-invoice.pdf',
+    )
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.source_documents[0]).toMatchObject({
+      id: 'src-missing-old-object',
+      r2_key: result.r2Key,
+      status: 'uploaded',
+    })
+    expect(await env.RAW_DOCUMENTS.head(result.r2Key)).not.toBeNull()
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-missing-old-object',
+      stage: 'queued',
+      error_message: null,
+    })
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toEqual([
+      {
+        jobId: 'job-missing-old-object',
+        sourceDocumentId: 'src-missing-old-object',
+        r2Key: result.r2Key,
+        fileName: 'invoice.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      },
+    ])
+  })
+
+  test('uploading identical file bytes preserves a healed R2 object when queue send fails', async () => {
+    const oldR2Key =
+      'raw-documents/2026/04/src-missing-old-object-queue-fail-invoice.pdf'
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-missing-old-object-queue-fail',
+          r2_key: oldR2Key,
+          content_hash:
+            '8af8156ccc437479646494ef7f4d4305ecab9a55442eaefad91b4b972dab51b2',
+          status: 'error',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-missing-old-object-queue-fail',
+          source_document_id: 'src-missing-old-object-queue-fail',
+          stage: 'error',
+          error_message: 'R2 object not found',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({})
+    env.INTAKE_QUEUE = createFakeQueue({ failSend: true })
+
+    await expect(
+      uploadInvoiceSourceDocument({
+        env,
+        file: new File(
+          ['queue-failure-missing-old-object-bytes'],
+          'invoice-retry.pdf',
+          {
+            type: 'application/pdf',
+          },
+        ),
+      }),
+    ).rejects.toThrow('Queue send failed')
+
+    const healedR2Key = tables.source_documents[0].r2_key
+    expect(healedR2Key).not.toBeNull()
+    expect(healedR2Key).not.toBe(oldR2Key)
+    expect(tables.source_documents[0]).toMatchObject({
+      id: 'src-missing-old-object-queue-fail',
+      r2_key: healedR2Key,
+      status: 'error',
+    })
+    expect(await env.RAW_DOCUMENTS.head(healedR2Key as string)).not.toBeNull()
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-missing-old-object-queue-fail',
+      stage: 'error',
+    })
+  })
+
+  test('uploading identical file bytes creates one queued job for an existing source without jobs', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-orphan-upload',
+          r2_key: 'raw-documents/2026/04/src-orphan-upload-invoice.pdf',
+          content_hash:
+            'd6424bee8353574cb308572b94ce9e4c5fcaf48aee323a568631cf1ae2ff2153',
+          status: 'uploaded',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-orphan-upload-invoice.pdf': {
+        body: 'orphan-source-bytes',
+        contentType: 'application/pdf',
+      },
+    })
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const result = await uploadInvoiceSourceDocument({
+      env,
+      file: new File(['orphan-source-bytes'], 'invoice-orphan.pdf', {
+        type: 'application/pdf',
+      }),
+    })
+
+    expect(result).toEqual({
+      jobId: tables.intake_jobs[0]?.id,
+      sourceDocumentId: 'src-orphan-upload',
+      r2Key: 'raw-documents/2026/04/src-orphan-upload-invoice.pdf',
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      source_document_id: 'src-orphan-upload',
+      stage: 'queued',
+    })
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toEqual([
+      {
+        jobId: result.jobId,
+        sourceDocumentId: 'src-orphan-upload',
+        r2Key: 'raw-documents/2026/04/src-orphan-upload-invoice.pdf',
+        fileName: 'invoice.pdf',
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-04-27T10:00:00.000Z',
+      },
+    ])
+  })
+
+  test('parallel retries of identical error-stage bytes reuse one queued job', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-parallel-error',
+          r2_key: 'raw-documents/2026/04/src-parallel-error-invoice.pdf',
+          content_hash:
+            'd77acb86e3042205b2011e924b32f4b01c930f7fdd2ee2f2ed9899ab0b564d00',
+          status: 'error',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-parallel-error',
+          source_document_id: 'src-parallel-error',
+          stage: 'error',
+          error_message: 'Queue unavailable',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      'raw-documents/2026/04/src-parallel-error-invoice.pdf': {
+        body: 'parallel-error-bytes',
+        contentType: 'application/pdf',
+      },
+    })
+    env.INTAKE_QUEUE = createFakeQueue()
+
+    const [first, second] = await Promise.all([
+      uploadInvoiceSourceDocument({
+        env,
+        file: new File(['parallel-error-bytes'], 'invoice-a.pdf', {
+          type: 'application/pdf',
+        }),
+      }),
+      uploadInvoiceSourceDocument({
+        env,
+        file: new File(['parallel-error-bytes'], 'invoice-b.pdf', {
+          type: 'application/pdf',
+        }),
+      }),
+    ])
+
+    expect(first).toEqual(second)
+    expect(first).toEqual({
+      jobId: 'job-parallel-error',
+      sourceDocumentId: 'src-parallel-error',
+      r2Key: 'raw-documents/2026/04/src-parallel-error-invoice.pdf',
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-parallel-error',
+      stage: 'queued',
+      error_message: null,
+    })
+    expect((env.INTAKE_QUEUE as unknown as FakeQueue).sentMessages).toHaveLength(1)
   })
 })
 
@@ -465,6 +959,467 @@ describe('invoice review D1 integration', () => {
     expect(tables.invoices).toHaveLength(0)
     expect(tables.invoice_items).toHaveLength(0)
     expect(tables.ledger_entries).toHaveLength(0)
+  })
+
+  test('confirming the same job after invoice identity correction updates the existing invoice', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-1',
+          original_filename: 'invoice.pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-1',
+          source_document_id: 'src-1',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        createExtractionResultRow({
+          id: 'ext-job-1',
+          intake_job_id: 'job-1',
+        }),
+      ],
+    })
+    const originalJob = createReadyReviewJob()
+    const correctedJob = createReadyReviewJob({
+      header: {
+        supplier: 'Makro Alcala',
+        invoiceNo: 'MK-002',
+        date: '2026-04-21',
+        totalAmount: '242.00',
+        taxAmount: '42.00',
+      },
+      lineItems: [
+        {
+          id: 'line-2',
+          name: 'Fanta 330ml',
+          qty: '20',
+          unit: 'can',
+          unitPrice: '10.00',
+          lineTotal: '200.00',
+          taxRate: '21%',
+          notes: '',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+    })
+
+    await expect(confirmInvoiceReviewJobInDatabase(env, originalJob)).resolves.toMatchObject({
+      ok: true,
+    })
+    const invoiceId = tables.invoices[0]?.id
+
+    await expect(
+      confirmInvoiceReviewJobInDatabase(env, correctedJob),
+    ).resolves.toMatchObject({
+      ok: true,
+    })
+
+    expect(tables.invoices).toHaveLength(1)
+    expect(tables.invoices[0]).toMatchObject({
+      id: invoiceId,
+      intake_job_id: 'job-1',
+      supplier_name: 'Makro Alcala',
+      document_number: 'MK-002',
+      invoice_date: '2026-04-21',
+      total_amount: 242,
+      tax_amount: 42,
+      dedupe_key: 'makro alcala|MK-002|2026-04-21',
+    })
+    expect(tables.invoice_items).toHaveLength(1)
+    expect(tables.invoice_items[0]).toMatchObject({
+      invoice_id: invoiceId,
+      raw_product_name: 'Fanta 330ml',
+      raw_quantity: 20,
+    })
+    expect(tables.ledger_entries).toHaveLength(1)
+    expect(tables.ledger_entries[0]).toMatchObject({
+      id: `ledger_${invoiceId}`,
+      entry_date: '2026-04-21',
+      amount: 242,
+      vendor: 'Makro Alcala',
+      source_id: invoiceId,
+    })
+  })
+
+  test('confirming the same supplier invoice from two jobs reuses invoice and ledger rows', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-a',
+          original_filename: 'invoice-a.pdf',
+        }),
+        createSourceDocumentRow({
+          id: 'src-b',
+          original_filename: 'invoice-b.pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-a',
+          source_document_id: 'src-a',
+          stage: 'needs_review',
+        }),
+        createIntakeJobRow({
+          id: 'job-b',
+          source_document_id: 'src-b',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        createExtractionResultRow({
+          id: 'ext-job-a',
+          intake_job_id: 'job-a',
+        }),
+        createExtractionResultRow({
+          id: 'ext-job-b',
+          intake_job_id: 'job-b',
+        }),
+      ],
+    })
+    const firstJob = createReadyReviewJob({ jobId: 'job-a', fileName: 'invoice-a.pdf' })
+    const secondJob = createReadyReviewJob({
+      jobId: 'job-b',
+      fileName: 'invoice-b.pdf',
+      lineItems: [
+        {
+          id: 'line-b',
+          name: 'Sprite 330ml',
+          qty: '5',
+          unit: 'can',
+          unitPrice: '20.00',
+          lineTotal: '100.00',
+          taxRate: '21%',
+          notes: '',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+    })
+
+    await expect(confirmInvoiceReviewJobInDatabase(env, firstJob)).resolves.toMatchObject({
+      ok: true,
+    })
+    await expect(confirmInvoiceReviewJobInDatabase(env, secondJob)).resolves.toMatchObject({
+      ok: true,
+    })
+
+    expect(tables.invoices).toHaveLength(1)
+    expect(tables.invoice_items).toHaveLength(1)
+    expect(tables.invoice_items[0]).toMatchObject({
+      invoice_id: tables.invoices[0]?.id,
+      raw_product_name: 'Sprite 330ml',
+      raw_quantity: 5,
+    })
+    expect(tables.ledger_entries).toHaveLength(1)
+    expect(tables.invoices[0]).toMatchObject({
+      supplier_name: 'Makro Madrid',
+      document_number: 'MK-001',
+      invoice_date: '2026-04-20',
+      total_amount: 121,
+      dedupe_key: 'makro madrid|MK-001|2026-04-20',
+    })
+    expect(tables.ledger_entries[0]?.source_id).toBe(tables.invoices[0]?.id)
+  })
+
+  test('reconfirming same job into an existing dedupe invoice merges accounting into the target invoice', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-a',
+          original_filename: 'invoice-a.pdf',
+        }),
+        createSourceDocumentRow({
+          id: 'src-b',
+          original_filename: 'invoice-b.pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-a',
+          source_document_id: 'src-a',
+          stage: 'needs_review',
+        }),
+        createIntakeJobRow({
+          id: 'job-b',
+          source_document_id: 'src-b',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        createExtractionResultRow({
+          id: 'ext-job-a',
+          intake_job_id: 'job-a',
+        }),
+        createExtractionResultRow({
+          id: 'ext-job-b',
+          intake_job_id: 'job-b',
+        }),
+      ],
+    })
+    const firstJob = createReadyReviewJob({ jobId: 'job-a', fileName: 'invoice-a.pdf' })
+    const secondJob = createReadyReviewJob({
+      jobId: 'job-b',
+      fileName: 'invoice-b.pdf',
+      header: {
+        supplier: 'Makro Alcala',
+        invoiceNo: 'MK-002',
+        date: '2026-04-21',
+        totalAmount: '242.00',
+        taxAmount: '42.00',
+      },
+      lineItems: [
+        {
+          id: 'line-b',
+          name: 'Sprite 330ml',
+          qty: '5',
+          unit: 'can',
+          unitPrice: '20.00',
+          lineTotal: '100.00',
+          taxRate: '21%',
+          notes: '',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+    })
+    const correctedFirstJob = createReadyReviewJob({
+      jobId: 'job-a',
+      fileName: 'invoice-a.pdf',
+      header: {
+        supplier: 'Makro Alcala',
+        invoiceNo: 'MK-002',
+        date: '2026-04-21',
+        totalAmount: '363.00',
+        taxAmount: '63.00',
+      },
+      lineItems: [
+        {
+          id: 'line-a-corrected',
+          name: 'Fanta 330ml',
+          qty: '30',
+          unit: 'can',
+          unitPrice: '10.00',
+          lineTotal: '300.00',
+          taxRate: '21%',
+          notes: '',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+    })
+
+    await expect(confirmInvoiceReviewJobInDatabase(env, firstJob)).resolves.toMatchObject({
+      ok: true,
+    })
+    const oldInvoiceId = tables.invoices[0]?.id
+
+    await expect(confirmInvoiceReviewJobInDatabase(env, secondJob)).resolves.toMatchObject({
+      ok: true,
+    })
+    const targetInvoiceId = tables.invoices.find(
+      (invoice) => invoice.dedupe_key === 'makro alcala|MK-002|2026-04-21',
+    )?.id
+
+    await expect(
+      confirmInvoiceReviewJobInDatabase(env, correctedFirstJob),
+    ).resolves.toMatchObject({
+      ok: true,
+    })
+
+    expect(tables.invoices).toHaveLength(1)
+    expect(tables.invoices[0]).toMatchObject({
+      id: targetInvoiceId,
+      intake_job_id: 'job-a',
+      source_document_id: 'src-a',
+      supplier_name: 'Makro Alcala',
+      document_number: 'MK-002',
+      invoice_date: '2026-04-21',
+      total_amount: 363,
+      tax_amount: 63,
+      dedupe_key: 'makro alcala|MK-002|2026-04-21',
+    })
+    expect(tables.invoices.some((invoice) => invoice.id === oldInvoiceId)).toBe(false)
+    expect(tables.invoice_items).toHaveLength(1)
+    expect(tables.invoice_items[0]).toMatchObject({
+      invoice_id: targetInvoiceId,
+      raw_product_name: 'Fanta 330ml',
+      raw_quantity: 30,
+    })
+    expect(tables.invoice_items.some((item) => item.invoice_id === oldInvoiceId)).toBe(
+      false,
+    )
+    expect(tables.ledger_entries).toHaveLength(1)
+    expect(tables.ledger_entries[0]).toMatchObject({
+      id: `ledger_${targetInvoiceId}`,
+      entry_date: '2026-04-21',
+      amount: 363,
+      vendor: 'Makro Alcala',
+      source_id: targetInvoiceId,
+    })
+    expect(
+      tables.ledger_entries.some((entry) => entry.source_id === oldInvoiceId),
+    ).toBe(false)
+  })
+
+  test('reconfirming the original duplicate job with a changed invoice keeps the shared duplicate invoice intact', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-a',
+          original_filename: 'invoice-a.pdf',
+        }),
+        createSourceDocumentRow({
+          id: 'src-b',
+          original_filename: 'invoice-b.pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-a',
+          source_document_id: 'src-a',
+          stage: 'needs_review',
+        }),
+        createIntakeJobRow({
+          id: 'job-b',
+          source_document_id: 'src-b',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        createExtractionResultRow({
+          id: 'ext-job-a',
+          intake_job_id: 'job-a',
+        }),
+        createExtractionResultRow({
+          id: 'ext-job-b',
+          intake_job_id: 'job-b',
+        }),
+      ],
+    })
+    const firstJob = createReadyReviewJob({ jobId: 'job-a', fileName: 'invoice-a.pdf' })
+    const secondJob = createReadyReviewJob({
+      jobId: 'job-b',
+      fileName: 'invoice-b.pdf',
+      lineItems: [
+        {
+          id: 'line-b',
+          name: 'Sprite 330ml',
+          qty: '5',
+          unit: 'can',
+          unitPrice: '20.00',
+          lineTotal: '100.00',
+          taxRate: '21%',
+          notes: '',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+    })
+    const correctedOriginalJob = createReadyReviewJob({
+      jobId: 'job-a',
+      fileName: 'invoice-a.pdf',
+      header: {
+        supplier: 'Makro Alcala',
+        invoiceNo: 'MK-002',
+        date: '2026-04-21',
+        totalAmount: '242.00',
+        taxAmount: '42.00',
+      },
+      lineItems: [
+        {
+          id: 'line-a-corrected',
+          name: 'Fanta 330ml',
+          qty: '20',
+          unit: 'can',
+          unitPrice: '10.00',
+          lineTotal: '200.00',
+          taxRate: '21%',
+          notes: '',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+    })
+
+    await expect(confirmInvoiceReviewJobInDatabase(env, firstJob)).resolves.toMatchObject({
+      ok: true,
+    })
+    await expect(confirmInvoiceReviewJobInDatabase(env, secondJob)).resolves.toMatchObject({
+      ok: true,
+    })
+    const sharedInvoiceId = tables.invoices[0]?.id
+
+    await expect(
+      confirmInvoiceReviewJobInDatabase(env, correctedOriginalJob),
+    ).resolves.toMatchObject({
+      ok: true,
+    })
+
+    const sharedInvoice = tables.invoices.find(
+      (invoice) => invoice.dedupe_key === 'makro madrid|MK-001|2026-04-20',
+    )
+    const correctedInvoice = tables.invoices.find(
+      (invoice) => invoice.dedupe_key === 'makro alcala|MK-002|2026-04-21',
+    )
+
+    expect(tables.invoices).toHaveLength(2)
+    expect(sharedInvoice).toMatchObject({
+      id: sharedInvoiceId,
+      intake_job_id: 'job-b',
+      source_document_id: 'src-b',
+      supplier_name: 'Makro Madrid',
+      document_number: 'MK-001',
+      invoice_date: '2026-04-20',
+      total_amount: 121,
+    })
+    expect(correctedInvoice).toMatchObject({
+      intake_job_id: 'job-a',
+      source_document_id: 'src-a',
+      supplier_name: 'Makro Alcala',
+      document_number: 'MK-002',
+      invoice_date: '2026-04-21',
+      total_amount: 242,
+    })
+    expect(correctedInvoice?.id).not.toBe(sharedInvoiceId)
+    expect(tables.invoice_items).toHaveLength(2)
+    expect(tables.invoice_items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          invoice_id: sharedInvoiceId,
+          raw_product_name: 'Sprite 330ml',
+          raw_quantity: 5,
+        }),
+        expect.objectContaining({
+          invoice_id: correctedInvoice?.id,
+          raw_product_name: 'Fanta 330ml',
+          raw_quantity: 20,
+        }),
+      ]),
+    )
+    expect(tables.ledger_entries).toHaveLength(2)
+    expect(tables.ledger_entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `ledger_${sharedInvoiceId}`,
+          entry_date: '2026-04-20',
+          amount: 121,
+          vendor: 'Makro Madrid',
+          source_id: sharedInvoiceId,
+        }),
+        expect.objectContaining({
+          id: `ledger_${correctedInvoice?.id}`,
+          entry_date: '2026-04-21',
+          amount: 242,
+          vendor: 'Makro Alcala',
+          source_id: correctedInvoice?.id,
+        }),
+      ]),
+    )
   })
 
   test('confirming an invoice no longer requires ingredient mapping and preserves stored tax-included totals', async () => {
@@ -1295,6 +2250,7 @@ interface SourceDocumentRow {
   r2_key: string | null
   original_filename: string
   mime_type: string | null
+  content_hash: string | null
   uploaded_by: string | null
   status: string
   uploaded_at: string
@@ -1337,6 +2293,7 @@ interface IngredientRow {
 interface InvoiceRow {
   id: string
   intake_job_id: string | null
+  dedupe_key: string
   invoice_date: string
   supplier_name: string
   document_number: string
@@ -1573,6 +2530,137 @@ class FakeD1PreparedStatement {
       return job ? [{ sourceDocumentId: job.source_document_id }] : []
     }
 
+    if (sql.includes('invoice:get-persisted-invoice-id')) {
+      const [dedupeKey] = this.params
+      const invoice = this.tables.invoices.find((row) => row.dedupe_key === dedupeKey)
+      return invoice ? [{ id: invoice.id }] : []
+    }
+
+    if (sql.includes('invoice:get-invoice-id')) {
+      const [invoiceId] = this.params
+      const invoice = this.tables.invoices.find((row) => row.id === invoiceId)
+      return invoice ? [{ id: invoice.id }] : []
+    }
+
+    if (sql.includes('invoice:resolve-existing-invoice')) {
+      const [jobId] = this.params
+      return this.tables.invoices
+        .filter((row) => row.intake_job_id === jobId)
+        .slice(0, 1)
+        .map((row) => ({ id: row.id }))
+    }
+
+    if (sql.includes('invoice-upload:find-duplicate')) {
+      const [contentHash] = this.params
+      return this.tables.intake_jobs
+        .filter((job) =>
+          ['queued', 'extracting', 'needs_review', 'ready'].includes(job.stage),
+        )
+        .map((job) => {
+          const sourceDocument = this.tables.source_documents.find(
+            (row) =>
+              row.id === job.source_document_id &&
+              row.content_hash === contentHash &&
+              row.source_type === 'invoice-upload',
+          )
+
+          return sourceDocument
+            ? {
+                jobId: job.id,
+                sourceDocumentId: sourceDocument.id,
+                r2Key: sourceDocument.r2_key,
+                createdAt: job.created_at,
+              }
+            : null
+        })
+        .filter((row): row is NonNullable<typeof row> => row !== null)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .slice(0, 1)
+        .map(({ createdAt: _createdAt, ...row }) => row)
+    }
+
+    if (sql.includes('invoice-upload:find-source-by-hash')) {
+      const [contentHash] = this.params
+      return this.tables.source_documents
+        .filter(
+          (row) =>
+            row.content_hash === contentHash &&
+            row.source_type === 'invoice-upload' &&
+            row.r2_key !== null,
+        )
+        .slice()
+        .sort((left, right) => right.uploaded_at.localeCompare(left.uploaded_at))
+        .slice(0, 1)
+        .map((row) => ({
+          sourceDocumentId: row.id,
+          r2Key: row.r2_key,
+          fileName: row.original_filename,
+          mimeType: row.mime_type,
+          uploadedAt: row.uploaded_at,
+        }))
+    }
+
+    if (sql.includes('invoice-upload:find-active-by-source')) {
+      const [sourceDocumentId] = this.params
+      return this.tables.intake_jobs
+        .filter(
+          (job) =>
+            job.source_document_id === sourceDocumentId &&
+            ['queued', 'extracting', 'needs_review', 'ready'].includes(job.stage),
+        )
+        .map((job) => {
+          const sourceDocument = this.tables.source_documents.find(
+            (row) => row.id === job.source_document_id,
+          )
+
+          return sourceDocument
+            ? {
+                jobId: job.id,
+                sourceDocumentId: sourceDocument.id,
+                r2Key: sourceDocument.r2_key,
+                fileName: sourceDocument.original_filename,
+                mimeType: sourceDocument.mime_type,
+                uploadedAt: sourceDocument.uploaded_at,
+                createdAt: job.created_at,
+              }
+            : null
+        })
+        .filter((row): row is NonNullable<typeof row> => row !== null)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .slice(0, 1)
+        .map(({ createdAt: _createdAt, ...row }) => row)
+    }
+
+    if (sql.includes('invoice-upload:find-error-job-by-source')) {
+      const [sourceDocumentId] = this.params
+      return this.tables.intake_jobs
+        .filter(
+          (job) =>
+            job.source_document_id === sourceDocumentId && job.stage === 'error',
+        )
+        .slice()
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+        .slice(0, 1)
+        .map((job) => ({
+          jobId: job.id,
+        }))
+    }
+
+    if (sql.includes('invoice-upload:find-deleting-by-source')) {
+      const [sourceDocumentId] = this.params
+      return this.tables.intake_jobs
+        .filter(
+          (job) =>
+            job.source_document_id === sourceDocumentId && job.stage === 'deleting',
+        )
+        .slice()
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+        .slice(0, 1)
+        .map((job) => ({
+          jobId: job.id,
+        }))
+    }
+
     if (sql.includes('invoice:review-draft-stage')) {
       const [jobId] = this.params
       const job = this.tables.intake_jobs.find((row) => row.id === jobId)
@@ -1695,6 +2783,154 @@ class FakeD1PreparedStatement {
       } else {
         this.tables.sales_daily.push(nextRow)
       }
+      return 1
+    }
+
+    if (sql.includes('insert into "source_documents"')) {
+      const [
+        id,
+        sourceType,
+        documentTypeGuess,
+        r2Key,
+        originalFilename,
+        mimeType,
+        maybeContentHash,
+        maybeUploadedBy,
+        maybeStatus,
+        maybeUploadedAt,
+      ] = this.params
+      const hasContentHash = this.params.length === 10
+      const contentHash = hasContentHash
+        ? maybeContentHash === null
+          ? null
+          : String(maybeContentHash)
+        : null
+
+      if (
+        contentHash !== null &&
+        this.tables.source_documents.some((row) => row.content_hash === contentHash)
+      ) {
+        throw new Error('D1_ERROR: UNIQUE constraint failed: source_documents.content_hash')
+      }
+
+      this.tables.source_documents.push({
+        id: String(id),
+        source_type: String(sourceType),
+        document_type_guess: String(documentTypeGuess),
+        r2_key: r2Key === null ? null : String(r2Key),
+        original_filename: String(originalFilename),
+        mime_type: mimeType === null ? null : String(mimeType),
+        content_hash: contentHash,
+        uploaded_by: (hasContentHash ? maybeUploadedBy : maybeContentHash) === null
+          ? null
+          : String(hasContentHash ? maybeUploadedBy : maybeContentHash),
+        status: String(hasContentHash ? maybeStatus : maybeUploadedBy),
+        uploaded_at: String(hasContentHash ? maybeUploadedAt : maybeStatus),
+      })
+      return 1
+    }
+
+    if (sql.includes('invoice-upload:insert-job-if-no-active')) {
+      const [
+        id,
+        sourceDocumentId,
+        extractorProvider,
+        extractorModel,
+        createdAt,
+        updatedAt,
+        guardSourceDocumentId,
+      ] = this.params
+      const hasBlockingJob = this.tables.intake_jobs.some(
+        (row) =>
+          row.source_document_id === guardSourceDocumentId &&
+          ['queued', 'extracting', 'needs_review', 'ready', 'deleting'].includes(
+            row.stage,
+          ),
+      )
+
+      if (hasBlockingJob) {
+        return 0
+      }
+
+      this.tables.intake_jobs.push({
+        id: String(id),
+        source_document_id: String(sourceDocumentId),
+        extractor_provider:
+          extractorProvider === null ? null : String(extractorProvider),
+        extractor_model: extractorModel === null ? null : String(extractorModel),
+        stage: 'queued',
+        confidence_score: null,
+        error_message: null,
+        created_at: String(createdAt),
+        updated_at: String(updatedAt),
+      })
+      return 1
+    }
+
+    if (sql.includes('insert into "intake_jobs"')) {
+      const [
+        id,
+        sourceDocumentId,
+        extractorProvider,
+        extractorModel,
+        stage,
+        createdAt,
+        updatedAt,
+      ] = this.params
+      this.tables.intake_jobs.push({
+        id: String(id),
+        source_document_id: String(sourceDocumentId),
+        extractor_provider:
+          extractorProvider === null ? null : String(extractorProvider),
+        extractor_model: extractorModel === null ? null : String(extractorModel),
+        stage: String(stage),
+        confidence_score: null,
+        error_message: null,
+        created_at: String(createdAt),
+        updated_at: String(updatedAt),
+      })
+      return 1
+    }
+
+    if (sql.includes('invoice-upload:requeue-error-job-if-no-active')) {
+      const [
+        extractorProvider,
+        extractorModel,
+        updatedAt,
+        jobId,
+        sourceDocumentId,
+        guardSourceDocumentId,
+      ] = this.params
+      const hasBlockingJob = this.tables.intake_jobs.some(
+        (row) =>
+          row.source_document_id === guardSourceDocumentId &&
+          ['queued', 'extracting', 'needs_review', 'ready', 'deleting'].includes(
+            row.stage,
+          ),
+      )
+
+      if (hasBlockingJob) {
+        return 0
+      }
+
+      const row = this.tables.intake_jobs.find(
+        (candidate) =>
+          candidate.id === jobId &&
+          candidate.source_document_id === sourceDocumentId &&
+          candidate.stage === 'error',
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.stage = 'queued'
+      row.extractor_provider =
+        extractorProvider === null ? null : String(extractorProvider)
+      row.extractor_model = extractorModel === null ? null : String(extractorModel)
+      row.confidence_score = null
+      row.error_message = null
+      row.updated_at = String(updatedAt)
       return 1
     }
 
@@ -1843,6 +3079,21 @@ class FakeD1PreparedStatement {
         row.extractor_model = String(this.params[2])
         row.confidence_score = Number(this.params[3])
       }
+      return 1
+    }
+
+    if (sql.includes('invoice-upload:update-source-r2-key')) {
+      const [r2Key, sourceDocumentId] = this.params
+      const row = this.tables.source_documents.find(
+        (candidate) => candidate.id === sourceDocumentId,
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.r2_key = String(r2Key)
+      row.status = 'uploaded'
       return 1
     }
 
@@ -2054,6 +3305,172 @@ class FakeD1PreparedStatement {
       return beforeCount - this.tables.source_documents.length
     }
 
+    if (sql.includes('invoice:delete-retired-ledger')) {
+      const [invoiceId, jobId] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage === 'ready',
+      )
+
+      if (!job) {
+        return 0
+      }
+
+      const beforeCount = this.tables.ledger_entries.length
+      this.tables.ledger_entries = this.tables.ledger_entries.filter(
+        (row) => row.source_kind !== 'invoice' || row.source_id !== invoiceId,
+      )
+      return beforeCount - this.tables.ledger_entries.length
+    }
+
+    if (sql.includes('invoice:delete-retired-items')) {
+      const [invoiceId, jobId] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage === 'ready',
+      )
+
+      if (!job) {
+        return 0
+      }
+
+      const beforeCount = this.tables.invoice_items.length
+      this.tables.invoice_items = this.tables.invoice_items.filter(
+        (row) => row.invoice_id !== invoiceId,
+      )
+      return beforeCount - this.tables.invoice_items.length
+    }
+
+    if (sql.includes('invoice:delete-retired-invoice')) {
+      const [invoiceId, intakeJobId, guardJobId] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === guardJobId && candidate.stage === 'ready',
+      )
+
+      if (!job) {
+        return 0
+      }
+
+      const beforeCount = this.tables.invoices.length
+      this.tables.invoices = this.tables.invoices.filter(
+        (row) => row.id !== invoiceId || row.intake_job_id !== intakeJobId,
+      )
+      return beforeCount - this.tables.invoices.length
+    }
+
+    if (sql.includes('invoice:merge-into-existing-dedupe')) {
+      const [
+        intakeJobId,
+        invoiceDate,
+        supplierName,
+        documentNumber,
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+        sourceDocumentId,
+        dedupeKey,
+        now,
+        id,
+        guardJobId,
+      ] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === guardJobId && candidate.stage === 'ready',
+      )
+      const existingRow = this.tables.invoices.find((row) => row.id === id)
+
+      if (!job || !existingRow) {
+        return 0
+      }
+
+      if (
+        this.tables.invoices.some(
+          (row) => row.id !== existingRow.id && row.dedupe_key === dedupeKey,
+        )
+      ) {
+        throw new Error('UNIQUE constraint failed: invoices.dedupe_key')
+      }
+
+      if (
+        this.tables.invoices.some(
+          (row) => row.id !== existingRow.id && row.intake_job_id === intakeJobId,
+        )
+      ) {
+        throw new Error('UNIQUE constraint failed: invoices.intake_job_id')
+      }
+
+      Object.assign(existingRow, {
+        intake_job_id: String(intakeJobId),
+        dedupe_key: String(dedupeKey),
+        invoice_date: String(invoiceDate),
+        supplier_name: String(supplierName),
+        document_number: String(documentNumber),
+        subtotal_amount: toNullableNumber(subtotalAmount),
+        tax_amount: Number(taxAmount),
+        total_amount: Number(totalAmount),
+        source_document_id: String(sourceDocumentId),
+        review_status: 'ready',
+        updated_at: String(now),
+      })
+      return 1
+    }
+
+    if (sql.includes('invoice:update-existing-invoice')) {
+      const [
+        intakeJobId,
+        invoiceDate,
+        supplierName,
+        documentNumber,
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+        sourceDocumentId,
+        dedupeKey,
+        now,
+        id,
+        invoiceOwnerJobId,
+        guardJobId,
+      ] = this.params
+      const job = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === guardJobId && candidate.stage === 'ready',
+      )
+      const existingRow = this.tables.invoices.find(
+        (row) => row.id === id && row.intake_job_id === invoiceOwnerJobId,
+      )
+
+      if (!job || !existingRow) {
+        return 0
+      }
+
+      if (
+        this.tables.invoices.some(
+          (row) => row.id !== existingRow.id && row.dedupe_key === dedupeKey,
+        )
+      ) {
+        throw new Error('UNIQUE constraint failed: invoices.dedupe_key')
+      }
+
+      if (
+        this.tables.invoices.some(
+          (row) => row.id !== existingRow.id && row.intake_job_id === intakeJobId,
+        )
+      ) {
+        throw new Error('UNIQUE constraint failed: invoices.intake_job_id')
+      }
+
+      Object.assign(existingRow, {
+        intake_job_id: String(intakeJobId),
+        dedupe_key: String(dedupeKey),
+        invoice_date: String(invoiceDate),
+        supplier_name: String(supplierName),
+        document_number: String(documentNumber),
+        subtotal_amount: toNullableNumber(subtotalAmount),
+        tax_amount: Number(taxAmount),
+        total_amount: Number(totalAmount),
+        source_document_id: String(sourceDocumentId),
+        review_status: 'ready',
+        updated_at: String(now),
+      })
+      return 1
+    }
+
     if (sql.includes('invoice:upsert-invoice')) {
       const [
         id,
@@ -2065,6 +3482,7 @@ class FakeD1PreparedStatement {
         taxAmount,
         totalAmount,
         sourceDocumentId,
+        dedupeKey,
         now,
         guardJobId,
       ] = this.params
@@ -2076,10 +3494,13 @@ class FakeD1PreparedStatement {
         return 0
       }
 
-      const existingRow = this.tables.invoices.find((row) => row.id === id)
+      const existingRow = this.tables.invoices.find(
+        (row) => row.dedupe_key === dedupeKey,
+      )
       const nextRow: InvoiceRow = {
         id: String(id),
         intake_job_id: String(intakeJobId),
+        dedupe_key: String(dedupeKey),
         invoice_date: String(invoiceDate),
         supplier_name: String(supplierName),
         document_number: String(documentNumber),
@@ -2095,8 +3516,27 @@ class FakeD1PreparedStatement {
       }
 
       if (existingRow) {
-        Object.assign(existingRow, nextRow, { created_at: existingRow.created_at })
+        const conflictingIntakeJob = this.tables.invoices.find(
+          (row) => row.id !== existingRow.id && row.intake_job_id === intakeJobId,
+        )
+
+        if (conflictingIntakeJob) {
+          throw new Error('UNIQUE constraint failed: invoices.intake_job_id')
+        }
+
+        Object.assign(existingRow, nextRow, {
+          id: existingRow.id,
+          created_at: existingRow.created_at,
+        })
       } else {
+        if (this.tables.invoices.some((row) => row.id === id)) {
+          throw new Error('UNIQUE constraint failed: invoices.id')
+        }
+
+        if (this.tables.invoices.some((row) => row.intake_job_id === intakeJobId)) {
+          throw new Error('UNIQUE constraint failed: invoices.intake_job_id')
+        }
+
         this.tables.invoices.push(nextRow)
       }
       return 1
@@ -2236,6 +3676,7 @@ function createSourceDocumentRow(
     r2_key: 'raw-documents/2026/04/src-1-invoice.pdf',
     original_filename: 'invoice.pdf',
     mime_type: 'application/pdf',
+    content_hash: null,
     uploaded_by: null,
     status: 'processed',
     uploaded_at: '2026-04-27T10:00:00.000Z',
@@ -2273,10 +3714,26 @@ function createIngredientRow(overrides: Partial<IngredientRow> = {}): Ingredient
   }
 }
 
+function createExtractionResultRow(
+  overrides: Partial<ExtractionResultRow> = {},
+): ExtractionResultRow {
+  return {
+    id: 'ext-job-1',
+    intake_job_id: 'job-1',
+    markdown_text: '',
+    structured_json: null,
+    raw_response: null,
+    schema_version: 'invoice-extraction-v1',
+    created_at: '2026-04-27T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
 function createInvoiceRow(overrides: Partial<InvoiceRow> = {}): InvoiceRow {
   return {
     id: 'inv-1',
     intake_job_id: 'job-1',
+    dedupe_key: 'supplier|INV-1|2026-04-27',
     invoice_date: '2026-04-27',
     supplier_name: 'Supplier',
     document_number: 'INV-1',
@@ -2293,7 +3750,22 @@ function createInvoiceRow(overrides: Partial<InvoiceRow> = {}): InvoiceRow {
   }
 }
 
-function createReadyReviewJob(): InvoiceReviewJob {
+function createReadyReviewJob(
+  overrides: Partial<Omit<InvoiceReviewJob, 'header' | 'lineItems'>> & {
+    header?: Partial<InvoiceReviewJob['header']>
+    lineItems?: InvoiceReviewJob['lineItems']
+  } = {},
+): InvoiceReviewJob {
+  const header = {
+    supplier: 'Makro Madrid',
+    invoiceNo: 'MK-001',
+    date: '2026-04-20',
+    totalAmount: '121.00',
+    taxAmount: '21.00',
+    notes: '',
+    ...overrides.header,
+  }
+
   return {
     jobId: 'job-1',
     fileName: 'invoice.pdf',
@@ -2302,15 +3774,9 @@ function createReadyReviewJob(): InvoiceReviewJob {
     status: 'needs_review',
     stage: 'needs_review',
     errorMessage: null,
-    header: {
-      supplier: 'Makro Madrid',
-      invoiceNo: 'MK-001',
-      date: '2026-04-20',
-      totalAmount: '121.00',
-      taxAmount: '21.00',
-      notes: '',
-    },
-    lineItems: [
+    ...overrides,
+    header,
+    lineItems: overrides.lineItems ?? [
       {
         id: 'line-1',
         name: 'Coke 330ml',
@@ -2326,10 +3792,25 @@ function createReadyReviewJob(): InvoiceReviewJob {
 
 function createFakeR2Bucket(
   objects: Record<string, { body: string; contentType: string }>,
+  options: { failDelete?: boolean } = {},
 ) {
   const objectMap = new Map(Object.entries(objects))
 
   return {
+    head: async (key: string) => {
+      const object = objectMap.get(key)
+
+      if (!object) {
+        return null
+      }
+
+      return {
+        key,
+        httpMetadata: {
+          contentType: object.contentType,
+        },
+      }
+    },
     get: async (key: string) => {
       const object = objectMap.get(key)
 
@@ -2346,7 +3827,42 @@ function createFakeR2Bucket(
       }
     },
     delete: async (key: string) => {
+      if (options.failDelete) {
+        throw new Error(`R2 delete failed: ${key}`)
+      }
+
       objectMap.delete(key)
     },
+    put: async (
+      key: string,
+      value: File,
+      options?: { httpMetadata?: { contentType?: string } },
+    ) => {
+      objectMap.set(key, {
+        body: await value.text(),
+        contentType:
+          options?.httpMetadata?.contentType || value.type || 'application/octet-stream',
+      })
+    },
   } as unknown as R2Bucket
+}
+
+interface FakeQueue {
+  sentMessages: unknown[]
+  send: (message: unknown) => Promise<void>
+}
+
+function createFakeQueue(options: { failSend?: boolean } = {}): Queue & FakeQueue {
+  const sentMessages: unknown[] = []
+
+  return {
+    sentMessages,
+    send: async (message: unknown) => {
+      if (options.failSend) {
+        throw new Error('Queue send failed')
+      }
+
+      sentMessages.push(message)
+    },
+  } as Queue & FakeQueue
 }
