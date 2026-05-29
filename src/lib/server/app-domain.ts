@@ -401,13 +401,17 @@ function hasInvalidLineItemAmount(lineItems: InvoiceLineItemDraft[]) {
   return lineItems.some(
     (item) =>
       isInvalidOptionalPositiveAmount(item.qty) ||
-      isInvalidOptionalPositiveAmount(item.unitPrice) ||
-      isInvalidOptionalPositiveAmount(item.lineTotal ?? ''),
+      isInvalidOptionalAmount(item.unitPrice) ||
+      isInvalidOptionalAmount(item.lineTotal ?? ''),
   )
 }
 
 function isInvalidOptionalPositiveAmount(value: string) {
   return value.trim() !== '' && !isPositiveInvoiceAmount(value)
+}
+
+function isInvalidOptionalAmount(value: string) {
+  return value.trim() !== '' && !isInvoiceAmount(value)
 }
 
 function typedEntries<T extends Record<string, string>>(record: T) {
