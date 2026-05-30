@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "vite dev --port 3000",
-    "build": "vite build",
+    "build": "vite build && rm -f dist/server/.dev.vars",
     "postbuild": "test ! -f dist/server/.dev.vars",
     "preview": "vite preview",
     "test": "vitest run",

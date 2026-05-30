@@ -8,6 +8,7 @@ import {
 
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import {
   Table,
@@ -24,6 +25,7 @@ interface ReviewTableProps {
   disabled?: boolean
   onQuantityChange: (itemId: string, value: string) => void
   onUnitPriceChange: (itemId: string, value: string) => void
+  onExcludeFromPriceTrackingChange: (itemId: string, value: boolean) => void
 }
 
 export function ReviewTable({
@@ -31,6 +33,7 @@ export function ReviewTable({
   disabled = false,
   onQuantityChange,
   onUnitPriceChange,
+  onExcludeFromPriceTrackingChange,
 }: ReviewTableProps) {
   const columns = useMemo(() => {
     const columnHelper = createColumnHelper<InvoiceLineItemDraft>()
@@ -87,6 +90,41 @@ export function ReviewTable({
         ),
       }),
       columnHelper.display({
+        id: 'priceTracking',
+        header: '价格追踪',
+        cell: ({ row }) => {
+          const checkboxId = `exclude-price-tracking-${row.original.id}`
+          const comparisonText = formatPriceComparison(row.original)
+
+          return (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id={checkboxId}
+                  aria-label="不计入价格追踪"
+                  disabled={disabled}
+                  checked={row.original.excludeFromPriceTracking === true}
+                  onCheckedChange={(checked) =>
+                    onExcludeFromPriceTrackingChange(row.original.id, checked === true)
+                  }
+                />
+                <label
+                  htmlFor={checkboxId}
+                  className="text-xs text-muted-foreground"
+                >
+                  不计入价格追踪
+                </label>
+              </div>
+              {comparisonText ? (
+                <Badge variant="outline" className="rounded-lg text-[11px]">
+                  {comparisonText}
+                </Badge>
+              ) : null}
+            </div>
+          )
+        },
+      }),
+      columnHelper.display({
         id: 'lineTotal',
         header: () => <span className="block text-right">小计</span>,
         cell: ({ row }) => {
@@ -124,7 +162,12 @@ export function ReviewTable({
           ),
       }),
     ]
-  }, [disabled, onQuantityChange, onUnitPriceChange])
+  }, [
+    disabled,
+    onExcludeFromPriceTrackingChange,
+    onQuantityChange,
+    onUnitPriceChange,
+  ])
   const table = useReactTable({
     data: lineItems,
     columns,
@@ -185,6 +228,7 @@ function getColumnClassName(columnId: string) {
     case 'quantity':
       return 'min-w-24 text-right'
     case 'unitPrice':
+    case 'priceTracking':
     case 'lineTotal':
     case 'taxRate':
       return 'min-w-28 text-right'
@@ -192,5 +236,39 @@ function getColumnClassName(columnId: string) {
       return 'min-w-52'
     default:
       return undefined
+  }
+}
+
+function formatPriceComparison(item: InvoiceLineItemDraft) {
+  const comparison = item.excludeFromPriceTracking
+    ? { status: 'excluded' as const }
+    : item.priceComparison
+
+  if (!comparison) {
+    return null
+  }
+
+  const dateSuffix = comparison.previousInvoiceDate
+    ? ` vs ${comparison.previousInvoiceDate}`
+    : ''
+
+  switch (comparison.status) {
+    case 'excluded':
+      return '已排除价格追踪'
+    case 'first_record':
+      return `首次记录${dateSuffix}`
+    case 'unchanged':
+      return `价格无变化${dateSuffix}`
+    case 'changed': {
+      const delta = comparison.delta ?? 0
+      const deltaPercent = comparison.deltaPercent ?? 0
+      const direction = comparison.direction === 'down' ? '下降' : '上涨'
+      const amount = Math.abs(delta).toFixed(2)
+      const percent = Math.abs(deltaPercent).toFixed(1)
+
+      return `较上次${direction} €${amount} (${percent}%)${dateSuffix}`
+    }
+    default:
+      return null
   }
 }

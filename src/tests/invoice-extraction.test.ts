@@ -199,6 +199,7 @@ describe('invoice extraction helpers', () => {
         { pageNumber: 2, kind: 'pdf-page' },
       ],
     })
+    expect(draft.lineItems[0]?.excludeFromPriceTracking).toBe(false)
   })
 
   test('normalizes FP26020968 line items to tax-included unit and total prices', () => {
@@ -532,6 +533,7 @@ describe('invoice extraction helpers', () => {
       unitPrice: '12.10',
       lineTotal: '18.15',
     })
+    expect(draft.lineItems[0]?.excludeFromPriceTracking).toBe(false)
   })
 
   test('rehydrates v2 confidence and warnings for review jobs', () => {
@@ -683,6 +685,29 @@ Total: 87,40
       ingredient: 'lemon',
       matched: true,
     })
+    expect(draft.lineItems[0]?.excludeFromPriceTracking).toBe(false)
+  })
+
+  test('preserves explicit price tracking exclusions in stored drafts', () => {
+    const draft = parseStoredExtractionDraft(
+      JSON.stringify({
+        lineItems: [
+          {
+            id: 'item-1',
+            name: 'Promo beer',
+            qty: '24',
+            unit: 'can',
+            unitPrice: '1.10',
+            ingredient: '',
+            matched: false,
+            excludeFromPriceTracking: true,
+          },
+        ],
+      }),
+      'ticket.pdf',
+    )
+
+    expect(draft.lineItems[0]?.excludeFromPriceTracking).toBe(true)
   })
 
   test('maps intake stages to review status badges', () => {

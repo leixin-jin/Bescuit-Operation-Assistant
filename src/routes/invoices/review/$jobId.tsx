@@ -127,7 +127,9 @@ function InvoiceReviewWorkbenchPage() {
         throw new Error('Invoice review job is missing.')
       }
 
-      const reviewJob = mergeReviewFormValues(activeJob, value)
+      const reviewJob = createPersistableReviewJob(
+        mergeReviewFormValues(activeJob, value),
+      )
 
       if (mode === 'draft') {
         const savedJob = pipelineEnabled
@@ -232,6 +234,15 @@ function InvoiceReviewWorkbenchPage() {
 
     form.setFieldValue(`lineItems[${itemIndex}].${field}`, value)
     form.setFieldValue(`lineItems[${itemIndex}].lineTotal`, undefined)
+  }
+
+  const handleExcludeFromPriceTrackingChange = (itemId: string, value: boolean) => {
+    const itemIndex = form.state.values.lineItems.findIndex((item) => item.id === itemId)
+    if (itemIndex === -1) {
+      return
+    }
+
+    form.setFieldValue(`lineItems[${itemIndex}].excludeFromPriceTracking`, value)
   }
 
   if (isRehydratingJob) {
@@ -353,7 +364,10 @@ function InvoiceReviewWorkbenchPage() {
                 </div>
 
                 <div className="flex flex-1 flex-col overflow-hidden lg:flex-row">
-                  <div className="h-[45%] lg:h-full lg:w-[56%]">
+                  <div
+                    data-testid="invoice-review-document-pane"
+                    className="h-[45%] lg:h-full lg:w-[42%]"
+                  >
                     <DocumentPreview
                       fileName={editableJob.fileName}
                       jobId={editableJob.jobId}
@@ -377,7 +391,10 @@ function InvoiceReviewWorkbenchPage() {
                     />
                   </div>
 
-                  <div className="flex h-[55%] flex-col lg:h-full lg:w-[44%]">
+                  <div
+                    data-testid="invoice-review-details-pane"
+                    className="flex h-[55%] flex-col lg:h-full lg:w-[58%]"
+                  >
                     <div className="flex-1 space-y-6 overflow-auto p-6">
                       <ReviewHeaderForm
                         header={editableJob.header}
@@ -408,6 +425,9 @@ function InvoiceReviewWorkbenchPage() {
                             handleLineItemFieldChange(itemId, value, 'unitPrice')
                           }
                         }}
+                        onExcludeFromPriceTrackingChange={
+                          handleExcludeFromPriceTrackingChange
+                        }
                       />
                     </div>
 
@@ -521,7 +541,7 @@ function createInvoiceReviewFormValues(
           taxAmount: '',
           notes: '',
         },
-    lineItems: job ? job.lineItems.map((item) => ({ ...item })) : [],
+    lineItems: job ? job.lineItems.map(createEditableLineItemDraft) : [],
   }
 }
 
@@ -532,11 +552,33 @@ function mergeReviewFormValues(
   return {
     ...job,
     header: { ...values.header },
-    lineItems: values.lineItems.map((item) => ({
-      ...item,
-      ingredient: '',
-      matched: false,
-    })),
+    lineItems: values.lineItems.map(createEditableLineItemDraft),
+  }
+}
+
+function createEditableLineItemDraft(item: InvoiceLineItemDraft): InvoiceLineItemDraft {
+  return {
+    ...item,
+    priceComparison: item.priceComparison ? { ...item.priceComparison } : undefined,
+  }
+}
+
+function createPersistableLineItemDraft(
+  item: InvoiceLineItemDraft,
+): InvoiceLineItemDraft {
+  const { priceComparison: _priceComparison, ...persistableItem } = item
+
+  return {
+    ...persistableItem,
+    ingredient: '',
+    matched: false,
+  }
+}
+
+function createPersistableReviewJob(job: InvoiceReviewJob): InvoiceReviewJob {
+  return {
+    ...job,
+    lineItems: job.lineItems.map(createPersistableLineItemDraft),
   }
 }
 

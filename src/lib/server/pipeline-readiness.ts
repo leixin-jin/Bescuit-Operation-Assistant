@@ -16,7 +16,13 @@ const requiredInvoicePipelineColumns = {
     'total_amount',
     'review_status',
   ],
-  invoice_items: ['id', 'invoice_id', 'raw_product_name', 'ingredient_id'],
+  invoice_items: [
+    'id',
+    'invoice_id',
+    'raw_product_name',
+    'ingredient_id',
+    'valid_price',
+  ],
   ledger_entries: ['id', 'entry_date', 'entry_type', 'category', 'amount'],
   ingredients: ['id', 'name', 'base_unit'],
 } as const satisfies Record<string, readonly string[]>
