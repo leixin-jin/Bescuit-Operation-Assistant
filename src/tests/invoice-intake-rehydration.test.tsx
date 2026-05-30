@@ -112,6 +112,35 @@ async function renderRoute(initialPath: string) {
 }
 
 describe('invoice intake route hydration', () => {
+  test('keeps the original two-column card layout without horizontal overflow', async () => {
+    await renderRoute('/invoices/new')
+
+    expect(await screen.findByRole('heading', { name: '发票核对' })).toBeTruthy()
+
+    const workspace = document.querySelector('[data-testid="invoice-intake-workspace"]')
+    const grid = document.querySelector('[data-testid="invoice-intake-grid"]')
+    const recentTasksList = document.querySelector('[data-testid="recent-tasks-list"]')
+    const cards = document.querySelectorAll('[data-slot="card"]')
+
+    expect(workspace).toBeTruthy()
+    expect(workspace?.className ?? '').toContain('w-full')
+    expect(workspace?.className ?? '').toContain('overflow-x-hidden')
+    expect(workspace?.className ?? '').toContain('overflow-y-hidden')
+    expect(grid).toBeTruthy()
+    expect(grid?.className ?? '').toContain('min-h-0')
+    expect(grid?.className ?? '').toContain('flex-1')
+    expect(grid?.className ?? '').toContain('xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]')
+    expect(cards[0]?.className ?? '').toContain('rounded-xl')
+    expect(cards[1]?.className ?? '').toContain('rounded-xl')
+    expect(cards[1]?.className ?? '').toContain('min-h-0')
+    expect(recentTasksList).toBeTruthy()
+    expect(recentTasksList?.className ?? '').toContain('overflow-y-auto')
+
+    const cameraInput = document.querySelector('#invoice-camera-file')
+    expect(cameraInput?.className ?? '').toContain('hidden')
+    expect(cameraInput?.className ?? '').not.toContain('sr-only')
+  })
+
   test('client rehydrates recent jobs after the loader misses session-backed data', async () => {
     await renderRoute('/invoices/new')
 

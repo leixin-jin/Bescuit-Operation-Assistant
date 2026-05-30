@@ -17,7 +17,7 @@ import {
 import { selectInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/providers'
 import {
   INVOICE_EXTRACTION_SCHEMA_VERSION,
-  parseProviderExtractionResponse,
+  parseProviderExtractionResponse as parseProviderExtractionResponseFromSchema,
   type InvoiceExtractionDraft,
 } from '@/lib/server/invoice-extraction/schema'
 import type { InvoiceIntakeQueueMessage } from '@/lib/server/queue'
@@ -25,10 +25,19 @@ import type { InvoiceIntakeQueueMessage } from '@/lib/server/queue'
 export {
   buildInvoiceProviderInput,
   INVOICE_EXTRACTION_SCHEMA_VERSION,
-  parseProviderExtractionResponse,
   selectInvoiceExtractionProvider,
 }
 export type { InvoiceExtractionDraft } from '@/lib/server/invoice-extraction/schema'
+
+export function parseProviderExtractionResponse(input: {
+  rawJson: string
+  fileName: string
+  provider: string
+  model: string
+  documentKind?: InvoiceDocumentKind
+}): InvoiceExtractionDraft {
+  return withPriceTrackingDefaults(parseProviderExtractionResponseFromSchema(input))
+}
 
 interface StoredInvoiceExtractionDraft {
   schemaVersion?: string
@@ -74,6 +83,7 @@ export function createPendingExtractionDraft(
         unitPrice: '',
         ingredient: '',
         matched: false,
+        excludeFromPriceTracking: false,
       },
     ],
     markdownText: '',
@@ -138,7 +148,7 @@ export function parseStoredExtractionDraft(
 export function serializeExtractionDraft(
   draft: InvoiceExtractionDraft,
 ): string {
-  return JSON.stringify(draft)
+  return JSON.stringify(withPriceTrackingDefaults(draft))
 }
 
 export function mapIntakeStageToInvoiceStatus(stage: string): InvoiceJobStatus {
@@ -300,7 +310,7 @@ export async function processInvoiceIntakeQueueMessage(
     })
     const provider = selectInvoiceExtractionProvider(env)
     const extraction = await provider.extract(providerInput)
-    const extractionDraft = extraction.draft
+    const extractionDraft = withPriceTrackingDefaults(extraction.draft)
     const currentStage = await getCurrentQueueStage(db, message.jobId)
 
     if (currentStage.stage !== 'extracting') {
@@ -547,6 +557,7 @@ function normalizeLineItemDraft(
       typeof value.sourceText === 'string' && value.sourceText.trim().length > 0
         ? value.sourceText
         : undefined,
+    excludeFromPriceTracking: value.excludeFromPriceTracking === true,
   }
 }
 
@@ -667,6 +678,7 @@ function extractLineItems(markdownText: string, fileName: string) {
       unitPrice: amountCells.at(-1) ?? '',
       ingredient: '',
       matched: false,
+      excludeFromPriceTracking: false,
     })
 
     if (extractedItems.length >= 8) {
@@ -683,6 +695,16 @@ function inferUnit(cells: string[]) {
       .slice(1)
       .find((cell) => /^(kg|g|l|ml|ud|pcs|件|箱|瓶|包)$/i.test(cell)) ?? ''
   )
+}
+
+function withPriceTrackingDefaults(draft: InvoiceExtractionDraft): InvoiceExtractionDraft {
+  return {
+    ...draft,
+    lineItems: draft.lineItems.map((item) => ({
+      ...item,
+      excludeFromPriceTracking: item.excludeFromPriceTracking === true,
+    })),
+  }
 }
 
 export function calculateDraftConfidence(draft: InvoiceExtractionDraft) {

@@ -830,9 +830,10 @@ async function writeConfirmedInvoiceAccounting(
             normalized_quantity,
             normalized_unit,
             normalized_unit_price,
-            mapping_status
+            mapping_status,
+            valid_price
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           getInvoiceItemId(persistedInvoiceId, index),
@@ -848,6 +849,7 @@ async function writeConfirmedInvoiceAccounting(
           item.unit.trim() || null,
           parseOptionalCurrencyAmount(item.unitPrice),
           item.ingredient.trim() ? 'matched' : 'unmatched',
+          item.excludeFromPriceTracking ? 0 : 1,
         ),
     ),
     db

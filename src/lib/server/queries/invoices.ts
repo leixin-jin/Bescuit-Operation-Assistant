@@ -2,6 +2,7 @@ import {
   formatInvoiceTimestamp,
   getInvoiceReadinessSummary,
   getInvoiceStatusLabel,
+  type InvoiceReviewJob,
 } from '@/lib/server/app-domain'
 import {
   demoIngredientOptions,
@@ -28,12 +29,29 @@ export async function listInvoiceJobs() {
 }
 
 export async function getInvoiceJob(jobId: string) {
-  return getStoredInvoiceJob(jobId) ?? null
+  return withFallbackPriceComparisons(getStoredInvoiceJob(jobId) ?? null)
 }
 
 export async function getInvoiceReviewPageData(jobId: string) {
   return {
-    job: getStoredInvoiceJob(jobId) ?? null,
+    job: withFallbackPriceComparisons(getStoredInvoiceJob(jobId) ?? null),
     ingredientOptions: demoIngredientOptions,
+  }
+}
+
+function withFallbackPriceComparisons(job: InvoiceReviewJob | null) {
+  if (!job) {
+    return null
+  }
+
+  return {
+    ...job,
+    lineItems: job.lineItems.map((item) => ({
+      ...item,
+      priceComparison:
+        item.excludeFromPriceTracking === true
+          ? { status: 'excluded' as const }
+          : (item.priceComparison ?? { status: 'first_record' as const }),
+    })),
   }
 }

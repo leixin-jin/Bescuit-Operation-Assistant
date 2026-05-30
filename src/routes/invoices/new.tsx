@@ -215,8 +215,11 @@ function InvoiceIntakePage() {
 
   return (
     <AppShell>
-      <div className="p-6 lg:p-10">
-        <div className="mb-8">
+      <div
+        data-testid="invoice-intake-workspace"
+        className="flex h-[calc(100vh-3.5rem)] w-full flex-col overflow-x-hidden overflow-y-hidden p-6 lg:h-screen lg:p-10"
+      >
+        <div className="mb-8 shrink-0">
           <Link
             to="/"
             className="mb-4 inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -234,15 +237,18 @@ function InvoiceIntakePage() {
           </div>
         </div>
 
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
-          <Card className="rounded-xl">
+        <div
+          data-testid="invoice-intake-grid"
+          className="grid min-h-0 w-full min-w-0 flex-1 gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]"
+        >
+          <Card className="min-h-0 min-w-0 rounded-xl">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
                 <Camera className="h-4 w-4" />
                 上传发票
               </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-6">
+            <CardContent className="min-h-0 space-y-6 overflow-y-auto">
               <div className="rounded-2xl border border-dashed border-muted-foreground/25 bg-muted/30 p-6">
                 <div className="mx-auto flex max-w-xl flex-col items-center text-center">
                   <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-background">
@@ -274,12 +280,12 @@ function InvoiceIntakePage() {
                       <Camera className="mr-2 h-4 w-4" />
                       手机拍照
                     </Label>
-                    <Input
+                    <input
                       id="invoice-camera-file"
                       type="file"
                       accept="image/*"
                       capture="environment"
-                      className="sr-only"
+                      className="hidden"
                       onChange={handleFileChange}
                     />
                   </div>
@@ -379,11 +385,14 @@ function InvoiceIntakePage() {
             </CardContent>
           </Card>
 
-          <Card className="rounded-xl">
+          <Card className="min-h-0 min-w-0 rounded-xl">
             <CardHeader>
               <CardTitle className="text-base">最近任务</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3">
+            <CardContent
+              data-testid="recent-tasks-list"
+              className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1"
+            >
               {recentJobs.length > 0 ? (
                 recentJobs.map((job) => {
                   const canDelete = isInvoiceJobDeletable(job)

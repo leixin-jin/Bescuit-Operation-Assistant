@@ -68,8 +68,22 @@ export interface InvoiceLineItemDraft {
   notes?: string
   ingredient: string
   matched: boolean
+  excludeFromPriceTracking?: boolean
   confidence?: number
   sourceText?: string
+  priceComparison?: InvoiceItemPriceComparison
+}
+
+export type InvoiceItemPriceDirection = 'up' | 'down' | 'same'
+
+export interface InvoiceItemPriceComparison {
+  status: 'excluded' | 'first_record' | 'changed' | 'unchanged'
+  previousPrice?: number
+  previousInvoiceDate?: string
+  previousSupplierName?: string
+  delta?: number
+  deltaPercent?: number
+  direction?: InvoiceItemPriceDirection
 }
 
 export interface InvoiceExtractionSummary {

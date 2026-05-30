@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 declare module 'vitest' {
   interface Assertion<T = any> {
     toBeInTheDocument(): T
+    toBeChecked(): T
   }
 }
 
@@ -20,6 +21,18 @@ expect.extend({
         pass
           ? 'expected element not to be in the document'
           : 'expected element to be in the document',
+    }
+  },
+  toBeChecked(received: Element | null) {
+    const pass =
+      received instanceof HTMLElement &&
+      (received.getAttribute('aria-checked') === 'true' ||
+        (received instanceof HTMLInputElement && received.checked))
+
+    return {
+      pass,
+      message: () =>
+        pass ? 'expected element not to be checked' : 'expected element to be checked',
     }
   },
 })
@@ -77,6 +90,15 @@ vi.mock('@/lib/server/queries/invoices', async () => {
                 notes: '',
                 ingredient: '',
                 matched: false,
+                priceComparison: {
+                  status: 'changed' as const,
+                  previousPrice: 25.62,
+                  previousInvoiceDate: '2026-05-19',
+                  previousSupplierName: 'VINOS ISABEL MARIA CRUSAT SA',
+                  delta: -0.01,
+                  deltaPercent: -0.04,
+                  direction: 'down' as const,
+                },
               },
             ],
           },
@@ -185,6 +207,8 @@ vi.mock('@/lib/server/queries/invoices', async () => {
               notes: 'Descuento: 42,33',
               ingredient: '',
               matched: false,
+              excludeFromPriceTracking: true,
+              priceComparison: { status: 'excluded' as const },
             },
           ],
         },
@@ -272,6 +296,22 @@ async function renderRoute(initialPath: string) {
 }
 
 describe('invoice review route hydration', () => {
+  test('gives invoice details more desktop space than the document preview', async () => {
+    await renderRoute('/invoices/review/booked-review-job')
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '发票核对' })).toBeTruthy()
+    })
+
+    const documentPane = document.querySelector('[data-testid="invoice-review-document-pane"]')
+    const detailsPane = document.querySelector('[data-testid="invoice-review-details-pane"]')
+
+    expect(documentPane).toBeTruthy()
+    expect(detailsPane).toBeTruthy()
+    expect(documentPane?.className ?? '').toContain('lg:w-[42%]')
+    expect(detailsPane?.className ?? '').toContain('lg:w-[58%]')
+  })
+
   test('client rehydrates the session-backed job after a loader miss', async () => {
     await renderRoute('/invoices/review/rehydrated-review-job')
 
@@ -298,6 +338,17 @@ describe('invoice review route hydration', () => {
     expect(screen.queryByText(/未映射到原料库/)).not.toBeInTheDocument()
   })
 
+  test('rehydrates price tracking exclusion state and comparison status', async () => {
+    await renderRoute('/invoices/review/review-tax-inclusive-job')
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '发票核对' })).toBeTruthy()
+    })
+
+    expect(screen.getByLabelText('不计入价格追踪')).toBeChecked()
+    expect(screen.getByText('已排除价格追踪')).toBeInTheDocument()
+  })
+
   test('shows booked review jobs with a green header status badge', async () => {
     await renderRoute('/invoices/review/booked-review-job')
 
@@ -308,6 +359,16 @@ describe('invoice review route hydration', () => {
     const bookedBadge = screen.getByText('已入账')
     expect(bookedBadge.className).toContain('bg-emerald-100')
     expect(bookedBadge.className).toContain('text-emerald-700')
+  })
+
+  test('shows price comparison badges from hydrated review data', async () => {
+    await renderRoute('/invoices/review/booked-review-job')
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '发票核对' })).toBeTruthy()
+    })
+
+    expect(screen.getByText('较上次下降 €0.01 (0.0%) vs 2026-05-19')).toBeInTheDocument()
   })
 
   test('recalculates line total display after quantity or unit price edits', async () => {

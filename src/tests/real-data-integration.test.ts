@@ -14,6 +14,8 @@ import {
   getInvoiceDocumentPreviewFromDatabase,
   getInvoiceDocumentPreviewResponse,
 } from '@/lib/server/queries/document-preview'
+import { getInvoiceReviewPageDataFromDatabase } from '@/lib/server/queries/invoices.rpc'
+import { getInvoiceItemPriceComparison } from '@/lib/server/queries/price-comparison'
 import { listIngredientOptionsFromDatabase } from '@/lib/server/queries/ingredients'
 import { getSalesRecordFromDatabase } from '@/lib/server/queries/sales'
 import {
@@ -860,6 +862,246 @@ describe('invoice review D1 integration', () => {
     })
   })
 
+  test('confirming a ready review job persists valid price tracking flags', async () => {
+    const { env, tables } = createFakeD1Env({
+      source_documents: [createSourceDocumentRow({ id: 'src-valid-price' })],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-valid-price',
+          source_document_id: 'src-valid-price',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        createExtractionResultRow({
+          id: 'ext-job-valid-price',
+          intake_job_id: 'job-valid-price',
+        }),
+      ],
+    })
+
+    await expect(
+      confirmInvoiceReviewJobInDatabase(
+        env,
+        createReadyReviewJob({
+          jobId: 'job-valid-price',
+          header: {
+            invoiceNo: 'MK-VALID-PRICE',
+          },
+          lineItems: [
+            {
+              id: 'item-1',
+              name: 'Coca Cola 330ml',
+              qty: '24',
+              unit: 'can',
+              unitPrice: '0.85',
+              lineTotal: '20.40',
+              ingredient: '',
+              matched: false,
+              excludeFromPriceTracking: false,
+            },
+            {
+              id: 'item-2',
+              name: 'Coca Cola 330ml Promo',
+              qty: '24',
+              unit: 'can',
+              unitPrice: '1.10',
+              lineTotal: '26.40',
+              ingredient: '',
+              matched: false,
+              excludeFromPriceTracking: true,
+            },
+          ],
+        }),
+      ),
+    ).resolves.toMatchObject({ ok: true })
+
+    expect(tables.invoice_items[0]?.valid_price).toBe(1)
+    expect(tables.invoice_items[1]?.valid_price).toBe(0)
+  })
+
+  test('price comparison reports a changed current valid item', async () => {
+    const { env } = createFakeD1Env({
+      invoices: [
+        createInvoiceRow({
+          id: 'inv-previous',
+          invoice_date: '2026-04-01',
+          supplier_name: 'Makro Madrid',
+          created_at: '2026-04-01T10:00:00.000Z',
+        }),
+      ],
+      invoice_items: [
+        createInvoiceItemRow({
+          id: 'item-previous',
+          invoice_id: 'inv-previous',
+          raw_product_name: 'Coca Cola 330ml',
+          raw_unit_price: 0.85,
+          valid_price: 1,
+        }),
+      ],
+    })
+
+    const comparison = await getInvoiceItemPriceComparison(env, {
+      invoiceDate: '2026-04-20',
+      rawProductName: 'Coca Cola 330ml',
+      ingredientId: null,
+      unitPrice: 1.1,
+      excludeFromPriceTracking: false,
+    })
+
+    expect(comparison).toMatchObject({
+      status: 'changed',
+      previousPrice: 0.85,
+      previousInvoiceDate: '2026-04-01',
+      previousSupplierName: 'Makro Madrid',
+      direction: 'up',
+    })
+    expect(comparison.delta).toBeCloseTo(0.25, 2)
+    expect(comparison.deltaPercent).toBeCloseTo(29.41, 2)
+  })
+
+  test('price comparison ignores an invalid previous price', async () => {
+    const { env } = createFakeD1Env({
+      invoices: [
+        createInvoiceRow({
+          id: 'inv-valid-previous',
+          invoice_date: '2026-04-01',
+          created_at: '2026-04-01T10:00:00.000Z',
+        }),
+        createInvoiceRow({
+          id: 'inv-invalid-previous',
+          invoice_date: '2026-04-15',
+          created_at: '2026-04-15T10:00:00.000Z',
+        }),
+      ],
+      invoice_items: [
+        createInvoiceItemRow({
+          id: 'item-valid-previous',
+          invoice_id: 'inv-valid-previous',
+          raw_product_name: 'Coca Cola 330ml',
+          raw_unit_price: 0.9,
+          valid_price: 1,
+        }),
+        createInvoiceItemRow({
+          id: 'item-invalid-previous',
+          invoice_id: 'inv-invalid-previous',
+          raw_product_name: 'Coca Cola 330ml',
+          raw_unit_price: 1.4,
+          valid_price: 0,
+        }),
+      ],
+    })
+
+    await expect(
+      getInvoiceItemPriceComparison(env, {
+        invoiceDate: '2026-04-20',
+        rawProductName: 'Coca Cola 330ml',
+        ingredientId: null,
+        unitPrice: 1,
+        excludeFromPriceTracking: false,
+      }),
+    ).resolves.toMatchObject({
+      status: 'changed',
+      previousPrice: 0.9,
+      previousInvoiceDate: '2026-04-01',
+    })
+  })
+
+  test('price comparison excludes current items marked out of tracking', async () => {
+    const { env } = createFakeD1Env()
+
+    await expect(
+      getInvoiceItemPriceComparison(env, {
+        invoiceDate: '2026-04-20',
+        rawProductName: 'Coca Cola 330ml',
+        ingredientId: null,
+        unitPrice: 1,
+        excludeFromPriceTracking: true,
+      }),
+    ).resolves.toEqual({ status: 'excluded' })
+  })
+
+  test('price comparison reports first record when no valid previous item exists', async () => {
+    const { env } = createFakeD1Env()
+
+    await expect(
+      getInvoiceItemPriceComparison(env, {
+        invoiceDate: '2026-04-20',
+        rawProductName: 'Coca Cola 330ml',
+        ingredientId: null,
+        unitPrice: 1,
+        excludeFromPriceTracking: false,
+      }),
+    ).resolves.toEqual({ status: 'first_record' })
+  })
+
+  test('review page data attaches price comparison to line items', async () => {
+    const { env } = createFakeD1Env({
+      source_documents: [createSourceDocumentRow({ id: 'src-review-comparison' })],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-review-comparison',
+          source_document_id: 'src-review-comparison',
+        }),
+      ],
+      extraction_results: [
+        createExtractionResultRow({
+          id: 'ext-review-comparison',
+          intake_job_id: 'job-review-comparison',
+          structured_json: JSON.stringify({
+            pageCount: 1,
+            header: {
+              supplier: 'Makro Madrid',
+              invoiceNo: 'MK-REVIEW-CURRENT',
+              date: '2026-04-20',
+              totalAmount: '26.40',
+              taxAmount: '4.58',
+              notes: '',
+            },
+            lineItems: [
+              {
+                id: 'line-review',
+                name: 'Coca Cola 330ml',
+                qty: '24',
+                unit: 'can',
+                unitPrice: '1.10',
+                lineTotal: '26.40',
+                ingredient: '',
+                matched: false,
+              },
+            ],
+          }),
+        }),
+      ],
+      ingredients: [createIngredientRow({ id: 'coke-330', name: 'Coke 330ml' })],
+      invoices: [
+        createInvoiceRow({
+          id: 'inv-review-previous',
+          invoice_date: '2026-04-01',
+          supplier_name: 'Makro Madrid',
+          created_at: '2026-04-01T10:00:00.000Z',
+        }),
+      ],
+      invoice_items: [
+        createInvoiceItemRow({
+          id: 'item-review-previous',
+          invoice_id: 'inv-review-previous',
+          raw_product_name: 'Coca Cola 330ml',
+          raw_unit_price: 0.85,
+          valid_price: 1,
+        }),
+      ],
+    })
+
+    const data = await getInvoiceReviewPageDataFromDatabase(
+      env,
+      'job-review-comparison',
+    )
+
+    expect(data.ingredientOptions).toEqual([{ value: 'coke-330', label: 'Coke 330ml' }])
+    expect(data.job?.lineItems[0]?.priceComparison?.status).toBe('changed')
+  })
+
   test('rechecking a booked invoice reruns extraction and returns it to review', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [
@@ -917,7 +1159,7 @@ describe('invoice review D1 integration', () => {
         }),
       ],
       invoice_items: [
-        {
+        createInvoiceItemRow({
           id: 'inv_job-recheck_item_1',
           invoice_id: 'inv_job-recheck',
           raw_product_name: 'Old Item',
@@ -930,7 +1172,7 @@ describe('invoice review D1 integration', () => {
           normalized_unit: 'unit',
           normalized_unit_price: 121,
           mapping_status: 'unmatched',
-        },
+        }),
       ],
       ledger_entries: [
         createLedgerRow({
@@ -2321,6 +2563,7 @@ interface InvoiceItemRow {
   normalized_unit: string | null
   normalized_unit_price: number | null
   mapping_status: string
+  valid_price: number
 }
 
 interface LedgerEntryRow {
@@ -2726,6 +2969,108 @@ class FakeD1PreparedStatement {
           structuredJson: row.structured_json,
           markdownText: row.markdown_text,
         }))
+    }
+
+    if (
+      sql.includes('from "extraction_results"') &&
+      sql.includes('"extraction_results"."intake_job_id" in')
+    ) {
+      const jobIds = new Set(this.params.map(String))
+
+      return this.tables.extraction_results
+        .filter((row) => jobIds.has(row.intake_job_id))
+        .slice()
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))
+        .map((row) => ({
+          jobId: row.intake_job_id,
+          structuredJson: row.structured_json,
+          createdAt: row.created_at,
+        }))
+    }
+
+    if (sql.includes('invoice:previous-valid-price')) {
+      const [
+        invoiceDate,
+        ingredientIdForPresence,
+        ingredientId,
+        ingredientIdForFallback,
+        rawProductName,
+      ] = this.params
+
+      return this.tables.invoice_items
+        .filter((item) => {
+          const invoice = this.tables.invoices.find(
+            (row) => row.id === item.invoice_id,
+          )
+
+          if (!invoice) {
+            return false
+          }
+
+          const matchesIdentity =
+            ingredientIdForPresence !== null
+              ? item.ingredient_id === ingredientId
+              : ingredientIdForFallback === null &&
+                item.raw_product_name === rawProductName
+
+          return (
+            item.valid_price === 1 &&
+            item.raw_unit_price !== null &&
+            invoice.invoice_date < String(invoiceDate) &&
+            matchesIdentity
+          )
+        })
+        .map((item) => {
+          const invoice = this.tables.invoices.find(
+            (row): row is InvoiceRow => row.id === item.invoice_id,
+          )
+
+          if (!invoice) {
+            throw new Error(`Missing invoice for item ${item.id}`)
+          }
+
+          return {
+            previousPrice: item.raw_unit_price,
+            previousInvoiceDate: invoice.invoice_date,
+            previousSupplierName: invoice.supplier_name,
+            invoiceCreatedAt: invoice.created_at,
+          }
+        })
+        .sort((left, right) => {
+          const dateComparison = right.previousInvoiceDate.localeCompare(
+            left.previousInvoiceDate,
+          )
+
+          return dateComparison === 0
+            ? right.invoiceCreatedAt.localeCompare(left.invoiceCreatedAt)
+            : dateComparison
+        })
+        .slice(0, 1)
+        .map(({ invoiceCreatedAt: _invoiceCreatedAt, ...row }) => row)
+    }
+
+    if (
+      sql.includes('from "intake_jobs"') &&
+      sql.includes('inner join "source_documents"') &&
+      sql.includes('where "intake_jobs"."id" = ?')
+    ) {
+      const [jobId] = this.params
+      const job = this.tables.intake_jobs.find((row) => row.id === jobId)
+      const sourceDocument = this.tables.source_documents.find(
+        (row) => row.id === job?.source_document_id,
+      )
+
+      return job && sourceDocument
+        ? [
+            {
+              jobId: job.id,
+              stage: job.stage,
+              errorMessage: job.error_message,
+              fileName: sourceDocument.original_filename,
+              uploadedAt: sourceDocument.uploaded_at,
+            },
+          ]
+        : []
     }
 
     if (sql.includes('document-preview:get-source')) {
@@ -3565,6 +3910,7 @@ class FakeD1PreparedStatement {
         normalizedUnit,
         normalizedUnitPrice,
         mappingStatus,
+        validPrice,
       ] = this.params
       this.tables.invoice_items.push({
         id: String(id),
@@ -3579,6 +3925,7 @@ class FakeD1PreparedStatement {
         normalized_unit: normalizedUnit === null ? null : String(normalizedUnit),
         normalized_unit_price: toNullableNumber(normalizedUnitPrice),
         mapping_status: String(mappingStatus),
+        valid_price: Number(validPrice),
       })
       return 1
     }
@@ -3746,6 +4093,27 @@ function createInvoiceRow(overrides: Partial<InvoiceRow> = {}): InvoiceRow {
     review_status: 'ready',
     created_at: '2026-04-27T10:00:00.000Z',
     updated_at: '2026-04-27T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function createInvoiceItemRow(
+  overrides: Partial<InvoiceItemRow> = {},
+): InvoiceItemRow {
+  return {
+    id: 'item-1',
+    invoice_id: 'inv-1',
+    raw_product_name: 'Item',
+    raw_quantity: null,
+    raw_unit: null,
+    raw_unit_price: null,
+    raw_line_total: null,
+    ingredient_id: null,
+    normalized_quantity: null,
+    normalized_unit: null,
+    normalized_unit_price: null,
+    mapping_status: 'unmatched',
+    valid_price: 1,
     ...overrides,
   }
 }

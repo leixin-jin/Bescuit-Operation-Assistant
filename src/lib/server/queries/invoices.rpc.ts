@@ -3,7 +3,10 @@ import { createServerFn } from '@tanstack/react-start'
 
 import { getDb } from '@/lib/db/client'
 import { extractionResults, intakeJobs, sourceDocuments } from '@/lib/db/schema'
-import type { InvoiceReviewJob } from '@/lib/server/app-domain'
+import {
+  parseOptionalCurrencyAmount,
+  type InvoiceReviewJob,
+} from '@/lib/server/app-domain'
 import {
   buildInvoiceReviewJob,
   createPendingExtractionDraft,
@@ -12,6 +15,7 @@ import {
 import { getServerEnv, type AppBindings } from '@/lib/server/bindings'
 import { hasInvoiceIntakePipelineSchema } from '@/lib/server/pipeline-readiness'
 import { listIngredientOptions } from '@/lib/server/queries/ingredients'
+import { getInvoiceItemPriceComparison } from '@/lib/server/queries/price-comparison'
 import { assertDemoDataEnabled } from '@/lib/server/runtime-config'
 
 export const getInvoicePipelineEnabled = createServerFn({ method: 'GET' }).handler(
@@ -37,13 +41,20 @@ export const getInvoiceReviewPageDataServerFn = createServerFn({
   .inputValidator((data: { jobId: string }) => data)
   .handler(async ({ data, context }) => {
     const env = getServerEnv(context)
-    const job = await getInvoiceJobFromDatabase(env, data.jobId)
-
-    return {
-      job,
-      ingredientOptions: await listIngredientOptions(env),
-    }
+    return getInvoiceReviewPageDataFromDatabase(env, data.jobId)
   })
+
+export async function getInvoiceReviewPageDataFromDatabase(
+  env: Partial<AppBindings> | null | undefined,
+  jobId: string,
+) {
+  const job = await getInvoiceJobFromDatabase(env, jobId)
+
+  return {
+    job: await attachPriceComparisonsToReviewJob(env, job),
+    ingredientOptions: await listIngredientOptions(env),
+  }
+}
 
 async function listInvoiceJobsFromDatabase(
   env: Partial<AppBindings> | null | undefined,
@@ -128,6 +139,33 @@ async function getInvoiceJobFromDatabase(
       latestExtractionByJobId.get(jobId) ??
       serializeExtractionDraft(createPendingExtractionDraft(jobRow.fileName)),
   })
+}
+
+async function attachPriceComparisonsToReviewJob(
+  env: Partial<AppBindings> | null | undefined,
+  job: InvoiceReviewJob | null,
+) {
+  if (!job || !env?.DB) {
+    return job
+  }
+
+  const lineItems = await Promise.all(
+    job.lineItems.map(async (item) => ({
+      ...item,
+      priceComparison: await getInvoiceItemPriceComparison(env, {
+        invoiceDate: job.header.date,
+        rawProductName: item.name.trim(),
+        ingredientId: item.ingredient.trim() || null,
+        unitPrice: parseOptionalCurrencyAmount(item.unitPrice),
+        excludeFromPriceTracking: item.excludeFromPriceTracking === true,
+      }),
+    })),
+  )
+
+  return {
+    ...job,
+    lineItems,
+  }
 }
 
 async function getLatestExtractionMap(

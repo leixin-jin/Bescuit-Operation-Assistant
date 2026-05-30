@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { index, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 
 export const sourceDocuments = sqliteTable(
   'source_documents',
@@ -151,10 +151,21 @@ export const invoiceItems = sqliteTable(
     normalizedUnit: text('normalized_unit'),
     normalizedUnitPrice: real('normalized_unit_price'),
     mappingStatus: text('mapping_status').notNull().default('unmatched'),
+    validPrice: integer('valid_price').notNull().default(1),
   },
   (table) => [
     index('invoice_items_invoice_idx').on(table.invoiceId),
     index('invoice_items_ingredient_idx').on(table.ingredientId),
+    index('invoice_items_valid_ingredient_price_idx').on(
+      table.validPrice,
+      table.ingredientId,
+      table.rawUnitPrice,
+    ),
+    index('invoice_items_valid_raw_name_price_idx').on(
+      table.validPrice,
+      table.rawProductName,
+      table.rawUnitPrice,
+    ),
   ],
 )
 
