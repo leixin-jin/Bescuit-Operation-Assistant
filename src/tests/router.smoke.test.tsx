@@ -118,6 +118,9 @@ describe('phase 1-4 smoke tests', () => {
     expect(await screen.findByRole('heading', { name: '今天要做什么？' })).toBeTruthy()
     expect(screen.getByRole('link', { name: /输入今日营业额/i })).toBeTruthy()
     expect(screen.getByRole('link', { name: /输入一张发票/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '开始录入' }).className).not.toContain(
+      'bg-secondary',
+    )
     expect(screen.getByRole('link', { name: '查看本月分析' })).toBeTruthy()
     expect(screen.getByRole('link', { name: '日历概览' })).toBeTruthy()
   })

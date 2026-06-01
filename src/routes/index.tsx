@@ -67,10 +67,7 @@ function HomePage() {
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <Button
-                    variant="secondary"
-                    className="w-full rounded-lg transition-colors group-hover:bg-primary group-hover:text-primary-foreground"
-                  >
+                  <Button className="w-full rounded-lg">
                     开始录入
                   </Button>
                 </CardContent>
