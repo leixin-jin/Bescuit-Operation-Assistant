@@ -8,6 +8,7 @@
     "MODE": "production",
     "INVOICE_EXTRACTION_PROVIDER": "gemini",
     "INVOICE_EXTRACTION_MODEL": "gemini-3.5-flash",
+    "INVOICE_EXTRACTION_TIMEOUT_MS": "180000",
     "INVOICE_PDF_INPUT_MODE": "native-pdf"
   },
   "observability": {
