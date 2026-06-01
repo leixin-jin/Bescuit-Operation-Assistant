@@ -241,6 +241,40 @@ describe('invoice mock store', () => {
     })
   })
 
+  test('excluded zero quantity gift adjustments do not block ready status', async () => {
+    const createdJob = await createInvoiceJob('metro-upload.pdf')
+
+    await saveInvoiceJob({
+      ...createdJob,
+      lineItems: createdJob.lineItems.map((item, index) => ({
+        ...item,
+        qty: index === 0 ? '0' : item.qty,
+        ingredient: index === 0 ? '' : 'lime',
+        matched: index !== 0,
+        unitPrice: index === 0 ? '1.10' : '1.50',
+        lineTotal: index === 0 ? '0.00' : item.lineTotal,
+        excludeFromPriceTracking: index === 0,
+      })),
+      header: {
+        supplier: 'Makro Madrid',
+        invoiceNo: 'MK-889120',
+        date: '2026-04-24',
+        totalAmount: '248.90',
+        taxAmount: '34.56',
+        notes: '',
+      },
+    })
+
+    const storedJob = await getInvoiceJob(createdJob.jobId)
+
+    expect(storedJob?.status).toBe('ready')
+    expect(getInvoiceReadinessSummary(storedJob!)).toMatchObject({
+      isReady: true,
+      invalidHeaderFields: [],
+      unmatchedLineItems: 0,
+    })
+  })
+
   test('unfinished jobs can be deleted from the browser session store', async () => {
     const createdJob = await createInvoiceJob('delete-me.pdf')
 

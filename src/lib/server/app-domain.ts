@@ -441,14 +441,43 @@ function isIsoDateInput(value: string) {
 function hasInvalidLineItemAmount(lineItems: InvoiceLineItemDraft[]) {
   return lineItems.some(
     (item) =>
-      isInvalidOptionalPositiveAmount(item.qty) ||
+      isInvalidLineItemQuantity(item) ||
       isInvalidOptionalAmount(item.unitPrice) ||
       isInvalidOptionalAmount(item.lineTotal ?? ''),
   )
 }
 
-function isInvalidOptionalPositiveAmount(value: string) {
-  return value.trim() !== '' && !isPositiveInvoiceAmount(value)
+function isInvalidLineItemQuantity(item: InvoiceLineItemDraft) {
+  if (item.qty.trim() === '') {
+    return false
+  }
+
+  if (isPositiveInvoiceAmount(item.qty)) {
+    return false
+  }
+
+  return !isZeroTotalExcludedLineItem(item)
+}
+
+function isZeroTotalExcludedLineItem(item: InvoiceLineItemDraft) {
+  if (item.excludeFromPriceTracking !== true || !isInvoiceAmount(item.qty)) {
+    return false
+  }
+
+  if (parseCurrencyAmount(item.qty) !== 0) {
+    return false
+  }
+
+  const lineTotal = item.lineTotal?.trim() ?? ''
+  if (lineTotal !== '') {
+    return isInvoiceAmount(lineTotal) && parseCurrencyAmount(lineTotal) === 0
+  }
+
+  if (!isInvoiceAmount(item.unitPrice)) {
+    return false
+  }
+
+  return roundCurrency(parseCurrencyAmount(item.qty) * parseCurrencyAmount(item.unitPrice)) === 0
 }
 
 function isInvalidOptionalAmount(value: string) {
