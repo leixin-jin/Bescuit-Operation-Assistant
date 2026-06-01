@@ -386,6 +386,32 @@ describe('invoice review route hydration', () => {
     expect(screen.getByText('€90.00')).toBeInTheDocument()
   })
 
+  test('keeps the cursor position while editing a line item amount', async () => {
+    await renderRoute('/invoices/review/review-tax-inclusive-job')
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '发票核对' })).toBeTruthy()
+    })
+
+    const unitPriceInput = screen.getByDisplayValue('25.61') as HTMLInputElement
+    unitPriceInput.focus()
+    unitPriceInput.setSelectionRange(3, 4)
+
+    fireEvent.change(unitPriceInput, {
+      target: {
+        value: '25.1',
+        selectionStart: 3,
+        selectionEnd: 3,
+      },
+    })
+
+    const editedInput = screen.getByDisplayValue('25.1') as HTMLInputElement
+
+    expect(document.activeElement).toBe(editedInput)
+    expect(editedInput.selectionStart).toBe(3)
+    expect(editedInput.selectionEnd).toBe(3)
+  })
+
   test('recheck button reruns invoice extraction and refreshes the review draft', async () => {
     await renderRoute('/invoices/review/recheck-review-job')
 

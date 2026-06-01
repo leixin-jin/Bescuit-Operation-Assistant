@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useForm } from '@tanstack/react-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, createFileRoute, useRouter } from '@tanstack/react-router'
@@ -218,11 +218,11 @@ function InvoiceReviewWorkbenchPage() {
     setCurrentPage(1)
   }, [activeJob, form, jobId])
 
-  const handleHeaderFieldChange = (field: keyof InvoiceHeaderDraft, value: string) => {
+  const handleHeaderFieldChange = useCallback((field: keyof InvoiceHeaderDraft, value: string) => {
     form.setFieldValue(`header.${field}`, value)
-  }
+  }, [form])
 
-  const handleLineItemFieldChange = (
+  const handleLineItemFieldChange = useCallback((
     itemId: string,
     value: string,
     field: 'qty' | 'unitPrice',
@@ -234,16 +234,28 @@ function InvoiceReviewWorkbenchPage() {
 
     form.setFieldValue(`lineItems[${itemIndex}].${field}`, value)
     form.setFieldValue(`lineItems[${itemIndex}].lineTotal`, undefined)
-  }
+  }, [form])
 
-  const handleExcludeFromPriceTrackingChange = (itemId: string, value: boolean) => {
+  const handleQuantityChange = useCallback((itemId: string, value: string) => {
+    if (isDecimalInput(value)) {
+      handleLineItemFieldChange(itemId, value, 'qty')
+    }
+  }, [handleLineItemFieldChange])
+
+  const handleUnitPriceChange = useCallback((itemId: string, value: string) => {
+    if (isDecimalInput(value)) {
+      handleLineItemFieldChange(itemId, value, 'unitPrice')
+    }
+  }, [handleLineItemFieldChange])
+
+  const handleExcludeFromPriceTrackingChange = useCallback((itemId: string, value: boolean) => {
     const itemIndex = form.state.values.lineItems.findIndex((item) => item.id === itemId)
     if (itemIndex === -1) {
       return
     }
 
     form.setFieldValue(`lineItems[${itemIndex}].excludeFromPriceTracking`, value)
-  }
+  }, [form])
 
   if (isRehydratingJob) {
     return (
@@ -415,16 +427,8 @@ function InvoiceReviewWorkbenchPage() {
                         disabled={
                           isPipelineJobProcessing || recheckReviewMutation.isPending
                         }
-                        onQuantityChange={(itemId, value) => {
-                          if (isDecimalInput(value)) {
-                            handleLineItemFieldChange(itemId, value, 'qty')
-                          }
-                        }}
-                        onUnitPriceChange={(itemId, value) => {
-                          if (isDecimalInput(value)) {
-                            handleLineItemFieldChange(itemId, value, 'unitPrice')
-                          }
-                        }}
+                        onQuantityChange={handleQuantityChange}
+                        onUnitPriceChange={handleUnitPriceChange}
                         onExcludeFromPriceTrackingChange={
                           handleExcludeFromPriceTrackingChange
                         }
