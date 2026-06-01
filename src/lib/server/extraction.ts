@@ -3,6 +3,7 @@ import { and, eq } from 'drizzle-orm'
 import { getDb } from '@/lib/db/client'
 import { intakeJobs } from '@/lib/db/schema'
 import {
+  ensureUniqueInvoiceLineItemIds,
   getMadridTodayInputValue,
   type InvoiceHeaderDraft,
   type InvoiceJobStatus,
@@ -107,6 +108,10 @@ export function parseStoredExtractionDraft(
       parsed.lineItems
         ?.map((item, index) => normalizeLineItemDraft(item, fileName, index))
         .filter((item): item is InvoiceLineItemDraft => item !== null) ?? []
+    const uniqueLineItems = ensureUniqueInvoiceLineItemIds(
+      lineItems,
+      slugifyText(fileName),
+    )
 
     return {
       schemaVersion:
@@ -120,7 +125,9 @@ export function parseStoredExtractionDraft(
       documentKind: normalizeDocumentKind(parsed.documentKind),
       header: normalizeHeaderDraft(parsed.header, pendingDraft.header),
       lineItems:
-        lineItems.length > 0 ? lineItems : pendingDraft.lineItems.map(cloneLineItemDraft),
+        uniqueLineItems.length > 0
+          ? uniqueLineItems
+          : pendingDraft.lineItems.map(cloneLineItemDraft),
       markdownText:
         typeof parsed.markdownText === 'string'
           ? parsed.markdownText

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import {
+  ensureUniqueInvoiceLineItemIds,
   getMadridTodayInputValue,
   type InvoiceHeaderDraft,
   type InvoiceLineItemDraft,
@@ -376,6 +377,10 @@ export function normalizeV2Draft(
       sourceText: item.sourceText?.trim(),
     }
   })
+  const uniqueLineItems = ensureUniqueInvoiceLineItemIds(
+    normalizedLineItems,
+    slugifyText(fileName),
+  )
   const header = {
     supplier: draft.header.supplier.trim() || pendingHeader.supplier,
     supplierTaxId: draft.header.supplierTaxId?.trim(),
@@ -395,12 +400,12 @@ export function normalizeV2Draft(
     pageCount: Math.max(1, draft.pageCount),
     documentKind: draft.documentKind,
     header,
-    lineItems: normalizedLineItems,
+    lineItems: uniqueLineItems,
     markdownText: draft.extractedText ?? '',
     provider: draft.provider,
     model: draft.model,
     confidence: draft.confidence,
-    warnings: appendTotalWarnings(draft.warnings, header, normalizedLineItems),
+    warnings: appendTotalWarnings(draft.warnings, header, uniqueLineItems),
     extractedText: draft.extractedText,
     sourcePages: draft.sourcePages,
   }

@@ -74,6 +74,33 @@ export interface InvoiceLineItemDraft {
   priceComparison?: InvoiceItemPriceComparison
 }
 
+export function ensureUniqueInvoiceLineItemIds(
+  lineItems: InvoiceLineItemDraft[],
+  fallbackIdPrefix: string,
+): InvoiceLineItemDraft[] {
+  const usedIds = new Set<string>()
+
+  return lineItems.map((item, index) => {
+    const fallbackId = `${fallbackIdPrefix}-${index + 1}`
+    const preferredId = item.id.trim() || fallbackId
+    let nextId = preferredId
+
+    if (usedIds.has(nextId)) {
+      nextId = fallbackId
+
+      let duplicateIndex = 2
+      while (usedIds.has(nextId)) {
+        nextId = `${fallbackId}-${duplicateIndex}`
+        duplicateIndex += 1
+      }
+    }
+
+    usedIds.add(nextId)
+
+    return nextId === item.id ? item : { ...item, id: nextId }
+  })
+}
+
 export type InvoiceItemPriceDirection = 'up' | 'down' | 'same'
 
 export interface InvoiceItemPriceComparison {

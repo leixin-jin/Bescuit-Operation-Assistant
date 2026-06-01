@@ -202,6 +202,62 @@ describe('invoice extraction helpers', () => {
     expect(draft.lineItems[0]?.excludeFromPriceTracking).toBe(false)
   })
 
+  test('deduplicates provider line item ids so repeated products remain independently editable', () => {
+    const draft = parseProviderExtractionResponse({
+      rawJson: JSON.stringify({
+        schemaVersion: 'invoice-extraction-v2',
+        pageCount: 1,
+        documentKind: 'pdf',
+        header: {
+          supplier: 'Proveedor SL',
+          invoiceNo: 'F-102',
+          date: '2026-05-08',
+          subtotalAmount: '64.03',
+          taxAmount: '13.45',
+          totalAmount: '77.48',
+          currency: 'EUR',
+          notes: '',
+        },
+        lineItems: [
+          {
+            id: '802',
+            name: 'ESTRELLA GALICIA 24x33 cl. RET',
+            qty: '6',
+            unit: 'ud',
+            unitPrice: '25.61',
+            lineTotal: '25.61',
+            ingredient: '',
+            matched: false,
+          },
+          {
+            id: '802',
+            name: 'ESTRELLA GALICIA 24x33 cl. RET',
+            qty: '3',
+            unit: 'ud',
+            unitPrice: '38.42',
+            lineTotal: '38.42',
+            ingredient: '',
+            matched: false,
+          },
+        ],
+        confidence: {
+          overall: 0.8,
+          header: 0.9,
+          lineItems: 0.75,
+          totals: 0.85,
+        },
+        warnings: [],
+        provider: 'gemini',
+        model: 'gemini-3.5-flash',
+      }),
+      fileName: 'factura.pdf',
+      provider: 'gemini',
+      model: 'gemini-3.5-flash',
+    })
+
+    expect(new Set(draft.lineItems.map((item) => item.id)).size).toBe(2)
+  })
+
   test('normalizes FP26020968 line items to tax-included unit and total prices', () => {
     const draft = parseProviderExtractionResponse({
       rawJson: JSON.stringify({
