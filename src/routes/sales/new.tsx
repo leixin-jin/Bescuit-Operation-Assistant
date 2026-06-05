@@ -17,6 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { showEntryCompletionToast } from '@/lib/entry-completion-toast'
 import {
   deriveSalesChannelAmounts,
   getDerivedCashAmount,
@@ -68,9 +69,11 @@ function SalesEntryPage() {
     onSuccess: async (savedRecord, variables) => {
       form.reset(createSalesFormValues(savedRecord, savedRecord.date))
       setBusinessDate(savedRecord.date)
-      setFeedbackMessage(
-        variables.mode === 'draft' ? '营业额草稿已保存。' : '今日营业额已提交。',
-      )
+      const successMessage =
+        variables.mode === 'draft' ? '营业额草稿已保存。' : '今日营业额已提交。'
+
+      setFeedbackMessage(successMessage)
+      showEntryCompletionToast(successMessage)
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] }),
         queryClient.invalidateQueries({ queryKey: ['sales-entry'] }),

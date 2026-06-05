@@ -1,8 +1,16 @@
 // @vitest-environment jsdom
 
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
-import { describe, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { createInvoiceJob, saveInvoiceJob } from '@/features/invoices/mock-store'
 import { routeTree } from '@/routeTree.gen'
@@ -14,6 +22,25 @@ const analyticsMocks = vi.hoisted(() => ({
 
 vi.mock('@/styles/globals.css?url', () => ({
   default: '/test.css',
+}))
+
+vi.mock('@/lib/entry-completion-toast', () => ({
+  showEntryCompletionToast: vi.fn((message: string) => {
+    const toastElement = document.createElement('section')
+    toastElement.setAttribute('aria-label', 'entry completion toast')
+    toastElement.dataset.testid = 'entry-completion-toast'
+
+    const titleElement = document.createElement('div')
+    titleElement.textContent = '输入完成'
+    toastElement.append(titleElement)
+
+    const descriptionElement = document.createElement('div')
+    descriptionElement.textContent = message
+    toastElement.append(descriptionElement)
+
+    document.body.append(toastElement)
+    window.setTimeout(() => toastElement.remove(), 3000)
+  }),
 }))
 
 vi.mock('@/lib/server/queries/analytics', async (importOriginal) => {
@@ -65,6 +92,39 @@ vi.mock('@/lib/server/queries/analytics', async (importOriginal) => {
   }
 })
 
+vi.mock('@/lib/server/mutations/sales', () => {
+  const createSalesRecord = (
+    input: {
+      date: string
+      amounts: { bbva: string; caixa: string; efectivo: string }
+      notes: string
+    },
+    status: 'draft' | 'submitted',
+  ) => ({
+    id: `sales-${input.date}`,
+    date: input.date,
+    totalAmount:
+      Number.parseFloat(input.amounts.bbva) +
+      Number.parseFloat(input.amounts.caixa) +
+      Number.parseFloat(input.amounts.efectivo),
+    bbvaAmount: Number.parseFloat(input.amounts.bbva),
+    caixaAmount: Number.parseFloat(input.amounts.caixa),
+    cashAmount: Number.parseFloat(input.amounts.efectivo),
+    status,
+    note: input.notes,
+    updatedAt: '2026-06-05T00:00:00.000Z',
+  })
+
+  return {
+    saveSalesDraftServerFn: vi.fn(async ({ data }) =>
+      createSalesRecord(data, 'draft'),
+    ),
+    submitSalesEntryServerFn: vi.fn(async ({ data }) =>
+      createSalesRecord(data, 'submitted'),
+    ),
+  }
+})
+
 vi.mock('@/components/year-month-picker', () => ({
   YearMonthPicker: ({
     value,
@@ -91,6 +151,15 @@ vi.mock('@/components/year-month-picker', () => ({
     )
   },
 }))
+
+afterEach(() => {
+  cleanup()
+  document
+    .querySelectorAll('[data-testid="entry-completion-toast"]')
+    .forEach((element) => element.remove())
+  vi.clearAllMocks()
+  vi.useRealTimers()
+})
 
 async function renderRoute(initialPath = '/') {
   const history = createMemoryHistory({
@@ -230,6 +299,35 @@ describe('phase 1-4 smoke tests', () => {
     expect((screen.getByRole('button', { name: /确认提交/ }) as HTMLButtonElement).disabled).toBe(
       true,
     )
+  })
+
+  test('sales entry shows a 3 second completion toast after submit', async () => {
+    vi.useFakeTimers()
+
+    await renderRoute('/sales/new')
+
+    fireEvent.change(screen.getByLabelText('TOTAL'), {
+      target: { value: '100' },
+    })
+    fireEvent.change(screen.getByLabelText('BBVA'), {
+      target: { value: '35.50' },
+    })
+    fireEvent.change(screen.getByLabelText('CAIXA'), {
+      target: { value: '20' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /确认提交/ }))
+
+    await act(async () => {})
+
+    const completionToast = screen.getByTestId('entry-completion-toast')
+    expect(within(completionToast).getByText('输入完成')).toBeTruthy()
+    expect(within(completionToast).getByText('今日营业额已提交。')).toBeTruthy()
+
+    await act(async () => {
+      vi.advanceTimersByTime(3000)
+    })
+
+    expect(screen.queryByTestId('entry-completion-toast')).toBeNull()
   })
 
   test('analytics calendar page renders monthly summary cards', async () => {
