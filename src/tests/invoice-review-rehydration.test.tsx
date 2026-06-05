@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
@@ -39,6 +47,25 @@ expect.extend({
 
 vi.mock('@/styles/globals.css?url', () => ({
   default: '/test.css',
+}))
+
+vi.mock('@/lib/entry-completion-toast', () => ({
+  showEntryCompletionToast: vi.fn((message: string) => {
+    const toastElement = document.createElement('section')
+    toastElement.setAttribute('aria-label', 'entry completion toast')
+    toastElement.dataset.testid = 'entry-completion-toast'
+
+    const titleElement = document.createElement('div')
+    titleElement.textContent = '输入完成'
+    toastElement.append(titleElement)
+
+    const descriptionElement = document.createElement('div')
+    descriptionElement.textContent = message
+    toastElement.append(descriptionElement)
+
+    document.body.append(toastElement)
+    window.setTimeout(() => toastElement.remove(), 3000)
+  }),
 }))
 
 vi.mock('@/lib/server/queries/invoices', async () => {
@@ -320,6 +347,31 @@ describe('invoice review route hydration', () => {
     })
 
     expect(screen.getAllByText(/rehydrated-review\.pdf/).length).toBeGreaterThan(0)
+  })
+
+  test('invoice review shows a 3 second completion toast after saving a draft', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    try {
+      await renderRoute('/invoices/review/rehydrated-review-job')
+
+      expect(await screen.findByRole('heading', { name: '发票核对' })).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: /保存草稿/ }))
+
+      const completionToast = await screen.findByTestId('entry-completion-toast')
+      expect(within(completionToast).getByText('输入完成')).toBeTruthy()
+      expect(within(completionToast).getByText('发票草稿已保存。')).toBeTruthy()
+
+      await act(async () => {
+        vi.advanceTimersByTime(3000)
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('entry-completion-toast')).toBeNull()
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('shows tax-inclusive pricing details without ingredient mapping UI', async () => {

@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { DocumentPreview } from '@/features/invoices/document-preview'
 import { ReviewHeaderForm } from '@/features/invoices/review-header-form'
 import { ReviewTable } from '@/features/invoices/review-table'
+import { showEntryCompletionToast } from '@/lib/entry-completion-toast'
 import type {
   InvoiceHeaderDraft,
   InvoiceLineItemDraft,
@@ -155,13 +156,19 @@ function InvoiceReviewWorkbenchPage() {
     },
     onSuccess: async (result) => {
       form.reset(createInvoiceReviewFormValues(result.job))
-      setFeedbackMessage(
+      const successMessage =
         result.mode === 'draft'
           ? '发票草稿已保存。'
           : result.ok
             ? '发票已确认，后续可进入入账链路。'
-            : '仍有阻塞项，暂不能确认入账。',
-      )
+            : '仍有阻塞项，暂不能确认入账。'
+
+      setFeedbackMessage(successMessage)
+
+      if (result.mode === 'draft' || result.ok) {
+        showEntryCompletionToast(successMessage)
+      }
+
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['invoice-review', jobId] }),
         queryClient.invalidateQueries({ queryKey: ['invoice-jobs'] }),
