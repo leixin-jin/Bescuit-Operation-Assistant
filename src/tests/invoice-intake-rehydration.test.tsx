@@ -1,12 +1,38 @@
 // @vitest-environment jsdom
 
 import type * as React from 'react'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
 import { describe, expect, test, vi } from 'vitest'
 
 vi.mock('@/styles/globals.css?url', () => ({
   default: '/test.css',
+}))
+
+vi.mock('@/lib/entry-completion-toast', () => ({
+  showEntryCompletionToast: vi.fn((message: string) => {
+    const toastElement = document.createElement('section')
+    toastElement.setAttribute('aria-label', 'entry completion toast')
+    toastElement.dataset.testid = 'entry-completion-toast'
+
+    const titleElement = document.createElement('div')
+    titleElement.textContent = '输入完成'
+    toastElement.append(titleElement)
+
+    const descriptionElement = document.createElement('div')
+    descriptionElement.textContent = message
+    toastElement.append(descriptionElement)
+
+    document.body.append(toastElement)
+    window.setTimeout(() => toastElement.remove(), 3000)
+  }),
 }))
 
 vi.mock('@/components/ui/alert-dialog', () => ({
@@ -162,5 +188,37 @@ describe('invoice intake route hydration', () => {
     await waitFor(() => {
       expect(deleteInvoiceIntakeJobMock).toHaveBeenCalledWith('rehydrated-intake-job')
     })
+  })
+
+  test('invoice intake shows a 3 second completion toast after creating a task', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    try {
+      await renderRoute('/invoices/new')
+
+      const file = new File(['invoice bytes'], 'toast-invoice.pdf', {
+        type: 'application/pdf',
+      })
+      const input = document.querySelector('#invoice-file') as HTMLInputElement
+
+      fireEvent.change(input, {
+        target: { files: [file] },
+      })
+      fireEvent.click(screen.getByRole('button', { name: /创建任务/ }))
+
+      const completionToast = await screen.findByTestId('entry-completion-toast')
+      expect(within(completionToast).getByText('输入完成')).toBeTruthy()
+      expect(within(completionToast).getByText('发票任务已创建。')).toBeTruthy()
+
+      await act(async () => {
+        vi.advanceTimersByTime(3000)
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('entry-completion-toast')).toBeNull()
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

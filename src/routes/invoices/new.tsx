@@ -39,6 +39,7 @@ import {
   MAX_INVOICE_UPLOAD_SIZE_BYTES,
   validateInvoiceUpload,
 } from '@/features/invoices/intake-file-validation'
+import { showEntryCompletionToast } from '@/lib/entry-completion-toast'
 import { isInvoiceJobDeletable } from '@/lib/server/app-domain'
 import {
   createInvoiceIntakeJob,
@@ -152,6 +153,7 @@ function InvoiceIntakePage() {
     }
 
     setFileErrorMessage(null)
+    let successCount = 0
 
     for (const item of validFiles) {
       setSelectedFiles((currentFiles) =>
@@ -164,6 +166,7 @@ function InvoiceIntakePage() {
 
       try {
         const result = await createJobMutation.mutateAsync(item.file)
+        successCount += 1
         setSelectedFiles((currentFiles) =>
           currentFiles.map((currentFile) =>
             currentFile.id === item.id
@@ -192,6 +195,12 @@ function InvoiceIntakePage() {
       queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] }),
       router.invalidate(),
     ])
+
+    if (successCount > 0) {
+      showEntryCompletionToast(
+        successCount > 1 ? `${successCount} 个发票任务已创建。` : '发票任务已创建。',
+      )
+    }
   }
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
