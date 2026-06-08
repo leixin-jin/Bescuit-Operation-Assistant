@@ -31,7 +31,6 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
   formatInvoiceUploadLimit,
@@ -273,30 +272,39 @@ function InvoiceIntakePage() {
                       ? '上传后会自动进入异步抽取链路。'
                       : '当前仅模拟创建 intake job。'}
                   </p>
-                  <Input
-                    id="invoice-file"
-                    type="file"
-                    accept={INVOICE_UPLOAD_ACCEPT}
-                    multiple
-                    className="mt-4 max-w-md rounded-lg"
-                    onChange={handleFileChange}
-                  />
-                  <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                  <div className="mt-4 flex w-full max-w-md flex-col gap-3 sm:flex-row">
+                    <Label
+                      htmlFor="invoice-file"
+                      className="relative inline-flex h-10 flex-1 cursor-pointer items-center justify-center overflow-hidden rounded-lg border bg-background px-4 text-sm font-medium shadow-sm transition-colors hover:bg-muted"
+                    >
+                      <Upload className="mr-2 h-4 w-4" />
+                      选择文件
+                      <input
+                        id="invoice-file"
+                        type="file"
+                        accept={INVOICE_UPLOAD_ACCEPT}
+                        multiple
+                        aria-label="选择发票文件"
+                        className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                        onChange={handleFileChange}
+                      />
+                    </Label>
                     <Label
                       htmlFor="invoice-camera-file"
-                      className="inline-flex h-10 cursor-pointer items-center justify-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+                      className="relative inline-flex h-10 flex-1 cursor-pointer items-center justify-center overflow-hidden rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
                     >
                       <Camera className="mr-2 h-4 w-4" />
                       手机拍照
+                      <input
+                        id="invoice-camera-file"
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        aria-label="手机拍照上传发票"
+                        className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                        onChange={handleFileChange}
+                      />
                     </Label>
-                    <input
-                      id="invoice-camera-file"
-                      type="file"
-                      accept="image/*"
-                      capture="environment"
-                      className="hidden"
-                      onChange={handleFileChange}
-                    />
                   </div>
                   {fileErrorMessage ? (
                     <p className="mt-3 text-sm text-destructive">

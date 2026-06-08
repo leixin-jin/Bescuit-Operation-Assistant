@@ -162,8 +162,16 @@ describe('invoice intake route hydration', () => {
     expect(recentTasksList).toBeTruthy()
     expect(recentTasksList?.className ?? '').toContain('overflow-y-auto')
 
+    const fileInput = document.querySelector('#invoice-file')
     const cameraInput = document.querySelector('#invoice-camera-file')
-    expect(cameraInput?.className ?? '').toContain('hidden')
+
+    expect(fileInput?.className ?? '').toContain('absolute')
+    expect(fileInput?.className ?? '').toContain('opacity-0')
+    expect(fileInput?.className ?? '').not.toContain('hidden')
+    expect(fileInput?.className ?? '').not.toContain('sr-only')
+    expect(cameraInput?.className ?? '').toContain('absolute')
+    expect(cameraInput?.className ?? '').toContain('opacity-0')
+    expect(cameraInput?.className ?? '').not.toContain('hidden')
     expect(cameraInput?.className ?? '').not.toContain('sr-only')
   })
 
