@@ -1,4 +1,4 @@
-import { useState, type ChangeEvent } from 'react'
+import { useRef, useState, type ChangeEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, createFileRoute, useRouter } from '@tanstack/react-router'
 import {
@@ -31,7 +31,6 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import { Label } from '@/components/ui/label'
 import {
   formatInvoiceUploadLimit,
   INVOICE_UPLOAD_ACCEPT,
@@ -80,6 +79,8 @@ function InvoiceIntakePage() {
   const { pipelineEnabled } = loaderData
   const [selectedFiles, setSelectedFiles] = useState<SelectedInvoiceFile[]>([])
   const [fileErrorMessage, setFileErrorMessage] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const cameraInputRef = useRef<HTMLInputElement>(null)
 
   const recentJobsQuery = useQuery({
     queryKey: ['invoice-jobs', pipelineEnabled],
@@ -262,9 +263,9 @@ function InvoiceIntakePage() {
                   <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-background">
                     <Upload className="h-6 w-6 text-muted-foreground" />
                   </div>
-                  <Label htmlFor="invoice-file" className="text-base font-medium">
+                  <p className="text-base font-medium">
                     拍照或上传 PDF/图片
-                  </Label>
+                  </p>
                   <p className="mt-2 text-sm text-muted-foreground">
                     支持 PDF 或常见图片格式，单文件不超过{' '}
                     {formatInvoiceUploadLimit(MAX_INVOICE_UPLOAD_SIZE_BYTES)}，
@@ -273,38 +274,43 @@ function InvoiceIntakePage() {
                       : '当前仅模拟创建 intake job。'}
                   </p>
                   <div className="mt-4 flex w-full max-w-md flex-col gap-3 sm:flex-row">
-                    <Label
-                      htmlFor="invoice-file"
-                      className="relative inline-flex h-10 flex-1 cursor-pointer items-center justify-center overflow-hidden rounded-lg border bg-background px-4 text-sm font-medium shadow-sm transition-colors hover:bg-muted"
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-10 flex-1 rounded-lg"
+                      onClick={() => fileInputRef.current?.click()}
                     >
                       <Upload className="mr-2 h-4 w-4" />
                       选择文件
-                      <input
-                        id="invoice-file"
-                        type="file"
-                        accept={INVOICE_UPLOAD_ACCEPT}
-                        multiple
-                        aria-label="选择发票文件"
-                        className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                        onChange={handleFileChange}
-                      />
-                    </Label>
-                    <Label
-                      htmlFor="invoice-camera-file"
-                      className="relative inline-flex h-10 flex-1 cursor-pointer items-center justify-center overflow-hidden rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+                    </Button>
+                    <Button
+                      type="button"
+                      className="h-10 flex-1 rounded-lg"
+                      onClick={() => cameraInputRef.current?.click()}
                     >
                       <Camera className="mr-2 h-4 w-4" />
                       手机拍照
-                      <input
-                        id="invoice-camera-file"
-                        type="file"
-                        accept="image/*"
-                        capture="environment"
-                        aria-label="手机拍照上传发票"
-                        className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                        onChange={handleFileChange}
-                      />
-                    </Label>
+                    </Button>
+                    <input
+                      ref={fileInputRef}
+                      id="invoice-file"
+                      type="file"
+                      accept={INVOICE_UPLOAD_ACCEPT}
+                      multiple
+                      aria-label="选择发票文件"
+                      className="sr-only"
+                      onChange={handleFileChange}
+                    />
+                    <input
+                      ref={cameraInputRef}
+                      id="invoice-camera-file"
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      aria-label="手机拍照上传发票"
+                      className="sr-only"
+                      onChange={handleFileChange}
+                    />
                   </div>
                   {fileErrorMessage ? (
                     <p className="mt-3 text-sm text-destructive">

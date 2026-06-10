@@ -165,14 +165,10 @@ describe('invoice intake route hydration', () => {
     const fileInput = document.querySelector('#invoice-file')
     const cameraInput = document.querySelector('#invoice-camera-file')
 
-    expect(fileInput?.className ?? '').toContain('absolute')
-    expect(fileInput?.className ?? '').toContain('opacity-0')
+    expect(fileInput?.className ?? '').toContain('sr-only')
     expect(fileInput?.className ?? '').not.toContain('hidden')
-    expect(fileInput?.className ?? '').not.toContain('sr-only')
-    expect(cameraInput?.className ?? '').toContain('absolute')
-    expect(cameraInput?.className ?? '').toContain('opacity-0')
+    expect(cameraInput?.className ?? '').toContain('sr-only')
     expect(cameraInput?.className ?? '').not.toContain('hidden')
-    expect(cameraInput?.className ?? '').not.toContain('sr-only')
   })
 
   test('client rehydrates recent jobs after the loader misses session-backed data', async () => {
@@ -183,6 +179,17 @@ describe('invoice intake route hydration', () => {
     await waitFor(() => {
       expect(screen.getByText('rehydrated-intake.pdf')).toBeTruthy()
     })
+  })
+
+  test('clicking the visible file picker button opens the file input', async () => {
+    await renderRoute('/invoices/new')
+
+    const fileInput = document.querySelector('#invoice-file') as HTMLInputElement
+    const clickSpy = vi.spyOn(fileInput, 'click').mockImplementation(() => undefined)
+
+    fireEvent.click(screen.getByRole('button', { name: '选择文件' }))
+
+    expect(clickSpy).toHaveBeenCalledOnce()
   })
 
   test('users can delete an unfinished recent invoice task', async () => {
