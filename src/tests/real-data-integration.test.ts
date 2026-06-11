@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { describe, expect, test } from 'vitest'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 import type { AppBindings } from '@/lib/server/bindings'
 import { getMadridTodayInputValue, type InvoiceReviewJob } from '@/lib/server/app-domain'
@@ -30,6 +30,24 @@ import {
 import { processInvoiceIntakeQueueMessage } from '@/lib/server/extraction'
 import { assertDemoDataEnabled } from '@/lib/server/runtime-config'
 import { uploadInvoiceSourceDocument } from '@/lib/server/upload'
+
+const providerExtractMock = vi.hoisted(() => vi.fn())
+
+vi.mock('@/lib/server/invoice-extraction/providers', () => ({
+  selectInvoiceExtractionProvider: vi.fn(() => ({
+    id: 'heuristic-v1',
+    model: 'filename-fallback-v1',
+    extract: providerExtractMock,
+  })),
+}))
+
+beforeEach(() => {
+  providerExtractMock.mockReset()
+  providerExtractMock.mockResolvedValue({
+    draft: createProviderDraft('filename-fallback', '0.00'),
+    rawResponse: 'filename-fallback default test extraction',
+  })
+})
 
 describe('real data integration boundaries', () => {
   test('production business data modules do not import fallback-store directly', () => {
@@ -2190,6 +2208,85 @@ describe('invoice review D1 integration', () => {
     expect(tables.intake_jobs[0]?.stage).toBe('deleting')
   })
 
+  test('queue processing persists additional invoice drafts as sibling review jobs', async () => {
+    const r2Key = 'raw-documents/2026/05/2605A008462-2605A008463.PDF'
+    const fileName = '2605A008462-2605A008463.PDF'
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-multi-invoice-pdf',
+          r2_key: r2Key,
+          original_filename: fileName,
+          mime_type: 'application/pdf',
+          status: 'uploaded',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-multi-invoice-pdf',
+          source_document_id: 'src-multi-invoice-pdf',
+          stage: 'queued',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      [r2Key]: {
+        body: '%PDF-multi-invoice',
+        contentType: 'application/pdf',
+      },
+    })
+    providerExtractMock.mockResolvedValueOnce({
+      draft: createProviderDraft('2605A008462', '769.22'),
+      rawResponse: 'primary invoice 2605A008462',
+      additionalDrafts: [
+        {
+          pageNumber: 2,
+          draft: createProviderDraft('2605A008463', '733.15', {
+            markdownText: 'page 2 invoice 2605A008463',
+          }),
+          rawResponse: 'additional invoice 2605A008463',
+        },
+      ],
+    })
+
+    await expect(
+      processInvoiceIntakeQueueMessage(env, {
+        jobId: 'job-multi-invoice-pdf',
+        sourceDocumentId: 'src-multi-invoice-pdf',
+        r2Key,
+        fileName,
+        mimeType: 'application/pdf',
+        uploadedAt: '2026-05-27T10:00:00.000Z',
+      }),
+    ).resolves.toEqual({
+      jobId: 'job-multi-invoice-pdf',
+      stage: 'needs_review',
+    })
+
+    expect(
+      tables.intake_jobs
+        .filter((row) => row.source_document_id === 'src-multi-invoice-pdf')
+        .sort((left, right) => left.id.localeCompare(right.id))
+        .map((row) => ({ id: row.id, stage: row.stage })),
+    ).toEqual([
+      { id: 'job-multi-invoice-pdf', stage: 'needs_review' },
+      { id: 'job-multi-invoice-pdf_p2', stage: 'needs_review' },
+    ])
+
+    const extractionSummaries = tables.extraction_results
+      .slice()
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((row) => ({
+        id: row.id,
+        invoiceNo: JSON.parse(row.structured_json ?? '{}').header?.invoiceNo,
+      }))
+
+    expect(extractionSummaries).toEqual([
+      { id: 'ext_job-multi-invoice-pdf', invoiceNo: '2605A008462' },
+      { id: 'ext_job-multi-invoice-pdf_p2', invoiceNo: '2605A008463' },
+    ])
+  })
+
   test('queue success race does not write extraction data after job becomes deleting', async () => {
     let stageReadCount = 0
     const { env, tables } = createFakeD1Env(
@@ -3237,6 +3334,37 @@ class FakeD1PreparedStatement {
       return 1
     }
 
+    if (sql.includes('invoice:persist-additional-intake-job')) {
+      const [
+        id,
+        sourceDocumentId,
+        extractorProvider,
+        extractorModel,
+        confidenceScore,
+        createdAt,
+        updatedAt,
+      ] = this.params
+      const existingRow = this.tables.intake_jobs.find((row) => row.id === id)
+      const nextRow: IntakeJobRow = {
+        id: String(id),
+        source_document_id: String(sourceDocumentId),
+        extractor_provider: String(extractorProvider),
+        extractor_model: String(extractorModel),
+        stage: 'needs_review',
+        confidence_score: Number(confidenceScore),
+        error_message: null,
+        created_at: String(createdAt),
+        updated_at: String(updatedAt),
+      }
+
+      if (existingRow) {
+        Object.assign(existingRow, nextRow, { id: existingRow.id })
+      } else {
+        this.tables.intake_jobs.push(nextRow)
+      }
+      return 1
+    }
+
     if (sql.includes('invoice-upload:requeue-error-job-if-no-active')) {
       const [
         extractorProvider,
@@ -3373,6 +3501,35 @@ class FakeD1PreparedStatement {
       return 1
     }
 
+    if (sql.includes('invoice:persist-additional-extraction')) {
+      const [
+        id,
+        intakeJobId,
+        markdownText,
+        structuredJson,
+        rawResponse,
+        schemaVersion,
+        createdAt,
+      ] = this.params
+      const existingRow = this.tables.extraction_results.find((row) => row.id === id)
+      const nextRow: ExtractionResultRow = {
+        id: String(id),
+        intake_job_id: String(intakeJobId),
+        markdown_text: markdownText === null ? null : String(markdownText),
+        structured_json: structuredJson === null ? null : String(structuredJson),
+        raw_response: rawResponse === null ? null : String(rawResponse),
+        schema_version: schemaVersion === null ? null : String(schemaVersion),
+        created_at: String(createdAt),
+      }
+
+      if (existingRow) {
+        Object.assign(existingRow, nextRow)
+      } else {
+        this.tables.extraction_results.push(nextRow)
+      }
+      return 1
+    }
+
     if (sql.includes('insert into "extraction_results"')) {
       const [
         id,
@@ -3403,7 +3560,6 @@ class FakeD1PreparedStatement {
     }
 
     if (sql.includes('update "intake_jobs"')) {
-      const nextStage = String(this.params[0])
       const updatedAt = String(this.params[this.params.length - 3])
       const jobId = this.params[this.params.length - 2]
       const expectedStage = this.params[this.params.length - 1]
@@ -3415,14 +3571,16 @@ class FakeD1PreparedStatement {
         return 0
       }
 
-      row.stage = nextStage
+      row.stage = sql.includes('"extractor_provider"')
+        ? 'needs_review'
+        : String(this.params[0])
       row.error_message = null
       row.updated_at = updatedAt
 
       if (sql.includes('"extractor_provider"')) {
-        row.extractor_provider = String(this.params[1])
-        row.extractor_model = String(this.params[2])
-        row.confidence_score = Number(this.params[3])
+        row.extractor_provider = String(this.params[0])
+        row.extractor_model = String(this.params[1])
+        row.confidence_score = Number(this.params[2])
       }
       return 1
     }
@@ -4073,6 +4231,52 @@ function createExtractionResultRow(
     schema_version: 'invoice-extraction-v1',
     created_at: '2026-04-27T10:00:00.000Z',
     ...overrides,
+  }
+}
+
+function createProviderDraft(
+  invoiceNo: string,
+  totalAmount: string,
+  overrides: {
+    markdownText?: string
+  } = {},
+) {
+  return {
+    schemaVersion: 'invoice-extraction-v2',
+    pageCount: 1,
+    documentKind: 'pdf',
+    header: {
+      supplier: 'Bescuit Test Supplier',
+      invoiceNo,
+      date: '2026-05-27',
+      subtotalAmount: totalAmount,
+      taxAmount: '0.00',
+      totalAmount,
+      currency: 'EUR',
+      notes: '',
+    },
+    lineItems: [
+      {
+        id: `${invoiceNo}-line-1`,
+        name: 'Test item',
+        qty: '1',
+        unit: 'unit',
+        unitPrice: totalAmount,
+        lineTotal: totalAmount,
+        ingredient: '',
+        matched: false,
+      },
+    ],
+    markdownText: overrides.markdownText ?? `invoice ${invoiceNo}`,
+    provider: 'heuristic-v1',
+    model: 'filename-fallback-v1',
+    confidence: {
+      overall: 0.95,
+      header: 0.95,
+      lineItems: 0.95,
+      totals: 0.95,
+    },
+    warnings: [],
   }
 }
 

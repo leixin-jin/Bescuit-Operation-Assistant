@@ -18,6 +18,7 @@ import {
   getExtractionResultId,
   mapIntakeStageToInvoiceStatus,
   parseStoredExtractionDraft,
+  persistAdditionalInvoiceExtractionDrafts,
   selectInvoiceExtractionProvider,
   serializeExtractionDraft,
   type InvoiceExtractionDraft,
@@ -391,6 +392,18 @@ export async function recheckInvoiceReviewJobInDatabase(
       .run()
 
     assertInvoiceMutationChanged(extractionResult, '发票任务状态已变化，不能保存重新核对结果。')
+
+    if (extraction.additionalDrafts?.length) {
+      await persistAdditionalInvoiceExtractionDrafts({
+        db,
+        originalJobId: row.jobId,
+        sourceDocumentId: row.sourceDocumentId,
+        providerId: provider.id,
+        providerModel: provider.model,
+        createdAt: extractionStoredAt,
+        additionalDrafts: extraction.additionalDrafts,
+      })
+    }
 
     await deleteConfirmedInvoiceAccountingRows(db, row.jobId)
 
