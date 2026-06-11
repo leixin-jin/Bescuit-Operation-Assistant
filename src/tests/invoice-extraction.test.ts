@@ -15,9 +15,15 @@ import {
 } from '@/lib/server/extraction'
 import { getInvoiceJobStage, getInvoiceStatusLabel, isInvoiceJobProcessing } from '@/lib/server/app-domain'
 import { createGeminiInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/gemini-provider'
+import { splitPageDraftsIntoProviderResult } from '@/lib/server/invoice-extraction/merge-page-drafts'
 import { classifyPageDrafts } from '@/lib/server/invoice-extraction/page-draft-classifier'
 import { splitPdfIntoPageInputs } from '@/lib/server/invoice-extraction/pdf-page-plan'
 import type { InvoiceExtractionDraft } from '@/lib/server/invoice-extraction/schema'
+
+type HeaderWithTotals = InvoiceExtractionDraft['header'] & {
+  subtotalAmount: string
+  currency: string
+}
 
 function makeDraft(input: {
   invoiceNo: string
@@ -387,7 +393,11 @@ describe('invoice extraction helpers', () => {
   })
 
   test('page-wise Gemini extraction merges page drafts with the same invoice number', async () => {
-    const responseFor = (totalAmount: string, pageNumber: number) => ({
+    const responseFor = (
+      totals: { subtotalAmount: string; taxAmount: string; totalAmount: string },
+      pageNumber: number,
+      currency = 'EUR',
+    ) => ({
       schemaVersion: 'invoice-extraction-v2',
       pageCount: 1,
       documentKind: 'pdf',
@@ -396,10 +406,10 @@ describe('invoice extraction helpers', () => {
         supplier: 'Emcadi S.A.',
         invoiceNo: 'F-100',
         date: '2026-05-31',
-        subtotalAmount: '',
-        taxAmount: '',
-        totalAmount,
-        currency: 'EUR',
+        subtotalAmount: totals.subtotalAmount,
+        taxAmount: totals.taxAmount,
+        totalAmount: totals.totalAmount,
+        currency,
         notes: '',
       },
       lineItems: [
@@ -408,8 +418,8 @@ describe('invoice extraction helpers', () => {
           name: `Page ${pageNumber} item`,
           qty: '1',
           unit: 'ud',
-          unitPrice: totalAmount || '1.00',
-          lineTotal: totalAmount || '1.00',
+          unitPrice: totals.totalAmount || '1.00',
+          lineTotal: totals.totalAmount || '1.00',
           ingredient: '',
           matched: false,
         },
@@ -422,12 +432,31 @@ describe('invoice extraction helpers', () => {
       .fn()
       .mockResolvedValueOnce(
         new Response(JSON.stringify({
-          candidates: [{ content: { parts: [{ text: JSON.stringify(responseFor('', 1)) }] } }],
+          candidates: [{
+            content: {
+              parts: [{
+                text: JSON.stringify(responseFor(
+                  { subtotalAmount: '40.00', taxAmount: '', totalAmount: '' },
+                  1,
+                )),
+              }],
+            },
+          }],
         })),
       )
       .mockResolvedValueOnce(
         new Response(JSON.stringify({
-          candidates: [{ content: { parts: [{ text: JSON.stringify(responseFor('120.00', 2)) }] } }],
+          candidates: [{
+            content: {
+              parts: [{
+                text: JSON.stringify(responseFor(
+                  { subtotalAmount: '100.00', taxAmount: '20.00', totalAmount: '120.00' },
+                  2,
+                  '',
+                )),
+              }],
+            },
+          }],
         })),
       )
 
@@ -475,6 +504,7 @@ describe('invoice extraction helpers', () => {
 
       expect(result.additionalDrafts).toBeUndefined()
       expect(result.draft.header.invoiceNo).toBe('F-100')
+      expect(result.draft.header.taxAmount).toBe('20.00')
       expect(result.draft.header.totalAmount).toBe('120.00')
       expect(result.draft.pageCount).toBe(2)
       expect(result.draft.lineItems.map((item) => item.id)).toEqual(['item-1', 'item-2'])
@@ -492,12 +522,43 @@ describe('invoice extraction helpers', () => {
     }
   })
 
+  test('page-wise Gemini extraction merges page drafts using all totals fields from the last totals page', () => {
+    const firstPage = makeDraft({ invoiceNo: 'F-100', totalAmount: '' })
+    const secondPage = makeDraft({ invoiceNo: 'F-100', totalAmount: '120.00' })
+
+    firstPage.header = {
+      ...firstPage.header,
+      subtotalAmount: '40.00',
+      taxAmount: '',
+      currency: 'EUR',
+    } as HeaderWithTotals
+    secondPage.header = {
+      ...secondPage.header,
+      subtotalAmount: '100.00',
+      taxAmount: '20.00',
+      currency: '',
+    } as HeaderWithTotals
+
+    const result = splitPageDraftsIntoProviderResult([
+      { pageNumber: 1, draft: firstPage, rawResponse: '{}' },
+      { pageNumber: 2, draft: secondPage, rawResponse: '{}' },
+    ])
+
+    const header = result.draft.header as HeaderWithTotals
+    expect(header.subtotalAmount).toBe('100.00')
+    expect(header.taxAmount).toBe('20.00')
+    expect(header.totalAmount).toBe('120.00')
+    expect(header.currency).toBe('EUR')
+  })
+
   test('classifies page drafts with different invoice numbers as separate invoices', () => {
     const result = classifyPageDrafts([
       { pageNumber: 1, draft: makeDraft({ invoiceNo: '2605A008462', totalAmount: '769.22' }), rawResponse: '{}' },
       { pageNumber: 2, draft: makeDraft({ invoiceNo: '2605A008463', totalAmount: '733.15' }), rawResponse: '{}' },
     ])
     expect(result.kind).toBe('multiple-invoices')
+    expect(result.pages).toHaveLength(2)
+    expect(result.pages[0]?.draft.header.invoiceNo).toBe('2605A008462')
   })
 
   test('classifies page drafts with the same invoice number as one invoice', () => {
@@ -506,6 +567,8 @@ describe('invoice extraction helpers', () => {
       { pageNumber: 2, draft: makeDraft({ invoiceNo: 'F-100', totalAmount: '120.00' }), rawResponse: '{}' },
     ])
     expect(result.kind).toBe('single-invoice')
+    expect(result.pages).toHaveLength(2)
+    expect(result.pages[1]?.draft.header.totalAmount).toBe('120.00')
   })
 
   test('page-wise Gemini extraction includes page number when a page fails schema validation', async () => {

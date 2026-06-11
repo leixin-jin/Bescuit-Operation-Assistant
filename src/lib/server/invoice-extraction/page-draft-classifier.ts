@@ -7,8 +7,8 @@ export interface PageDraftResult {
 }
 
 export type PageDraftClassification =
-  | { kind: 'single-invoice' }
-  | { kind: 'multiple-invoices' }
+  | { kind: 'single-invoice'; pages: PageDraftResult[] }
+  | { kind: 'multiple-invoices'; pages: PageDraftResult[] }
 
 export function classifyPageDrafts(
   pages: PageDraftResult[],
@@ -23,6 +23,6 @@ export function classifyPageDrafts(
   }
 
   return invoiceNumbers.size > 1
-    ? { kind: 'multiple-invoices' }
-    : { kind: 'single-invoice' }
+    ? { kind: 'multiple-invoices', pages }
+    : { kind: 'single-invoice', pages }
 }

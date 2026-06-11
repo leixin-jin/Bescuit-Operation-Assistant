@@ -11,14 +11,19 @@ type HeaderWithCurrency = PageDraftResult['draft']['header'] & {
 export function splitPageDraftsIntoProviderResult(
   pages: PageDraftResult[],
 ): InvoiceExtractionProviderResult {
-  const [primary, ...additional] = pages
+  if (pages.length === 0) {
+    throw new Error('Page-wise invoice extraction returned no page drafts')
+  }
+
+  const classification = classifyPageDrafts(pages)
+  const classifiedPages = classification.pages
+  const [primary, ...additional] = classifiedPages
 
   if (!primary) {
     throw new Error('Page-wise invoice extraction returned no page drafts')
   }
 
-  const classification = classifyPageDrafts(pages)
-  const rawResponse = buildPageWiseRawResponse(pages, classification.kind)
+  const rawResponse = buildPageWiseRawResponse(classifiedPages, classification.kind)
 
   if (classification.kind === 'multiple-invoices') {
     return {
@@ -32,14 +37,15 @@ export function splitPageDraftsIntoProviderResult(
     }
   }
 
-  const totalsPage = findLastPageWithTotal(pages) ?? primary
+  const totalsPage = findLastPageWithTotal(classifiedPages) ?? primary
   const totalsHeader = totalsPage.draft.header as HeaderWithCurrency
   const primaryHeader = primary.draft.header as HeaderWithCurrency
   const currency = totalsHeader.currency?.trim() || primaryHeader.currency?.trim()
   const mergedHeader: HeaderWithCurrency = {
     ...primary.draft.header,
-    totalAmount: totalsPage.draft.header.totalAmount,
-    taxAmount: totalsPage.draft.header.taxAmount,
+    subtotalAmount: totalsHeader.subtotalAmount,
+    taxAmount: totalsHeader.taxAmount,
+    totalAmount: totalsHeader.totalAmount,
   }
 
   if (currency) {
@@ -49,19 +55,19 @@ export function splitPageDraftsIntoProviderResult(
   return {
     draft: {
       ...primary.draft,
-      pageCount: pages.length,
+      pageCount: classifiedPages.length,
       header: mergedHeader,
-      lineItems: pages.flatMap((page) => page.draft.lineItems),
-      markdownText: pages
+      lineItems: classifiedPages.flatMap((page) => page.draft.lineItems),
+      markdownText: classifiedPages
         .map((page) => page.draft.markdownText.trim())
         .filter(Boolean)
         .join('\n\n'),
-      warnings: pages.flatMap((page) => page.draft.warnings ?? []),
-      extractedText: pages
+      warnings: classifiedPages.flatMap((page) => page.draft.warnings ?? []),
+      extractedText: classifiedPages
         .map((page) => page.draft.extractedText?.trim() ?? '')
         .filter(Boolean)
         .join('\n\n') || undefined,
-      sourcePages: pages.map((page) => ({
+      sourcePages: classifiedPages.map((page) => ({
         pageNumber: page.pageNumber,
         kind: 'pdf-page' as const,
       })),
