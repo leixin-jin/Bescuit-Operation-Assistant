@@ -15,7 +15,46 @@ import {
 } from '@/lib/server/extraction'
 import { getInvoiceJobStage, getInvoiceStatusLabel, isInvoiceJobProcessing } from '@/lib/server/app-domain'
 import { createGeminiInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/gemini-provider'
+import { classifyPageDrafts } from '@/lib/server/invoice-extraction/page-draft-classifier'
 import { splitPdfIntoPageInputs } from '@/lib/server/invoice-extraction/pdf-page-plan'
+import type { InvoiceExtractionDraft } from '@/lib/server/invoice-extraction/schema'
+
+function makeDraft(input: {
+  invoiceNo: string
+  totalAmount: string
+}): InvoiceExtractionDraft {
+  return {
+    schemaVersion: 'invoice-extraction-v2',
+    pageCount: 1,
+    documentKind: 'pdf',
+    header: {
+      supplier: 'Proveedor SL',
+      invoiceNo: input.invoiceNo,
+      date: '2026-05-31',
+      totalAmount: input.totalAmount,
+      taxAmount: '',
+      notes: '',
+    },
+    lineItems: [
+      {
+        id: `item-${input.invoiceNo || 'blank'}`,
+        name: 'Producto',
+        qty: '1',
+        unit: 'ud',
+        unitPrice: input.totalAmount,
+        lineTotal: input.totalAmount,
+        ingredient: '',
+        matched: false,
+      },
+    ],
+    markdownText: '',
+    provider: 'gemini',
+    model: 'gemini-3.5-flash',
+    confidence: { overall: 0.9, header: 0.9, lineItems: 0.9, totals: 0.9 },
+    warnings: [],
+    sourcePages: [{ pageNumber: 1, kind: 'pdf-page' }],
+  }
+}
 
 describe('invoice extraction helpers', () => {
   test('sends Gemini structured output fields accepted by generateContent REST API', async () => {
@@ -345,6 +384,128 @@ describe('invoice extraction helpers', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+
+  test('page-wise Gemini extraction merges page drafts with the same invoice number', async () => {
+    const responseFor = (totalAmount: string, pageNumber: number) => ({
+      schemaVersion: 'invoice-extraction-v2',
+      pageCount: 1,
+      documentKind: 'pdf',
+      sourcePages: [{ pageNumber, kind: 'pdf-page' }],
+      header: {
+        supplier: 'Emcadi S.A.',
+        invoiceNo: 'F-100',
+        date: '2026-05-31',
+        subtotalAmount: '',
+        taxAmount: '',
+        totalAmount,
+        currency: 'EUR',
+        notes: '',
+      },
+      lineItems: [
+        {
+          id: `item-${pageNumber}`,
+          name: `Page ${pageNumber} item`,
+          qty: '1',
+          unit: 'ud',
+          unitPrice: totalAmount || '1.00',
+          lineTotal: totalAmount || '1.00',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+      confidence: { overall: 0.9, header: 0.9, lineItems: 0.9, totals: 0.9 },
+      warnings: pageNumber === 2 ? ['Check page 2 total'] : [],
+    })
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: JSON.stringify(responseFor('', 1)) }] } }],
+        })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: JSON.stringify(responseFor('120.00', 2)) }] } }],
+        })),
+      )
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const provider = createGeminiInvoiceExtractionProvider({
+        apiKey: 'test-key',
+        model: 'gemini-3.5-flash',
+        timeoutMs: 1000,
+        pdfInputMode: 'page-wise',
+        splitPdfPages: async () => [
+          {
+            fileName: 'f-100.pdf',
+            mimeType: 'application/pdf',
+            arrayBuffer: new TextEncoder().encode('page-1').buffer,
+            size: 6,
+            base64: 'cGFnZS0x',
+            dataUrl: 'data:application/pdf;base64,cGFnZS0x',
+            documentKind: 'pdf',
+            pageNumber: 1,
+          },
+          {
+            fileName: 'f-100.pdf',
+            mimeType: 'application/pdf',
+            arrayBuffer: new TextEncoder().encode('page-2').buffer,
+            size: 6,
+            base64: 'cGFnZS0y',
+            dataUrl: 'data:application/pdf;base64,cGFnZS0y',
+            documentKind: 'pdf',
+            pageNumber: 2,
+          },
+        ],
+      })
+
+      const result = await provider.extract({
+        fileName: 'f-100.pdf',
+        mimeType: 'application/pdf',
+        arrayBuffer: new TextEncoder().encode('whole-pdf').buffer,
+        size: 9,
+        base64: 'd2hvbGUtcGRm',
+        dataUrl: 'data:application/pdf;base64,d2hvbGUtcGRm',
+        documentKind: 'pdf',
+      })
+
+      expect(result.additionalDrafts).toBeUndefined()
+      expect(result.draft.header.invoiceNo).toBe('F-100')
+      expect(result.draft.header.totalAmount).toBe('120.00')
+      expect(result.draft.pageCount).toBe(2)
+      expect(result.draft.lineItems.map((item) => item.id)).toEqual(['item-1', 'item-2'])
+      expect(result.draft.sourcePages).toEqual([
+        { pageNumber: 1, kind: 'pdf-page' },
+        { pageNumber: 2, kind: 'pdf-page' },
+      ])
+      expect(result.draft.warnings).toEqual(['Check page 2 total'])
+      expect(result.rawResponse ? JSON.parse(result.rawResponse) : null).toMatchObject({
+        pageWise: true,
+        pages: [{ pageNumber: 1 }, { pageNumber: 2 }],
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  test('classifies page drafts with different invoice numbers as separate invoices', () => {
+    const result = classifyPageDrafts([
+      { pageNumber: 1, draft: makeDraft({ invoiceNo: '2605A008462', totalAmount: '769.22' }), rawResponse: '{}' },
+      { pageNumber: 2, draft: makeDraft({ invoiceNo: '2605A008463', totalAmount: '733.15' }), rawResponse: '{}' },
+    ])
+    expect(result.kind).toBe('multiple-invoices')
+  })
+
+  test('classifies page drafts with the same invoice number as one invoice', () => {
+    const result = classifyPageDrafts([
+      { pageNumber: 1, draft: makeDraft({ invoiceNo: 'F-100', totalAmount: '' }), rawResponse: '{}' },
+      { pageNumber: 2, draft: makeDraft({ invoiceNo: 'F-100', totalAmount: '120.00' }), rawResponse: '{}' },
+    ])
+    expect(result.kind).toBe('single-invoice')
   })
 
   test('page-wise Gemini extraction includes page number when a page fails schema validation', async () => {

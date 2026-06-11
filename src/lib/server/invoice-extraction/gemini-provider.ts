@@ -9,8 +9,8 @@ import type {
 } from '@/lib/server/invoice-extraction/file-input'
 import {
   splitPageDraftsIntoProviderResult,
-  type PageExtractionResult,
-} from '@/lib/server/invoice-extraction/pdf-page-plan'
+} from '@/lib/server/invoice-extraction/merge-page-drafts'
+import type { PageDraftResult } from '@/lib/server/invoice-extraction/page-draft-classifier'
 import {
   invoiceExtractionResponseJsonSchema,
   parseProviderExtractionResponse,
@@ -70,7 +70,7 @@ async function extractPageWisePdf(
     return extractSingleInput(options, input)
   }
 
-  const pageResults: PageExtractionResult[] = []
+  const pageResults: PageDraftResult[] = []
 
   for (const pageInput of pageInputs) {
     try {
