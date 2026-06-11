@@ -1,12 +1,9 @@
+import { ensureUniqueInvoiceLineItemIds } from '@/lib/server/app-domain'
 import type { InvoiceExtractionProviderResult } from '@/lib/server/invoice-extraction/providers'
 import {
   classifyPageDrafts,
   type PageDraftResult,
 } from '@/lib/server/invoice-extraction/page-draft-classifier'
-
-type HeaderWithCurrency = PageDraftResult['draft']['header'] & {
-  currency?: string
-}
 
 export function splitPageDraftsIntoProviderResult(
   pages: PageDraftResult[],
@@ -38,10 +35,10 @@ export function splitPageDraftsIntoProviderResult(
   }
 
   const totalsPage = findLastPageWithTotal(classifiedPages) ?? primary
-  const totalsHeader = totalsPage.draft.header as HeaderWithCurrency
-  const primaryHeader = primary.draft.header as HeaderWithCurrency
+  const totalsHeader = totalsPage.draft.header
+  const primaryHeader = primary.draft.header
   const currency = totalsHeader.currency?.trim() || primaryHeader.currency?.trim()
-  const mergedHeader: HeaderWithCurrency = {
+  const mergedHeader = {
     ...primary.draft.header,
     subtotalAmount: totalsHeader.subtotalAmount,
     taxAmount: totalsHeader.taxAmount,
@@ -57,7 +54,10 @@ export function splitPageDraftsIntoProviderResult(
       ...primary.draft,
       pageCount: classifiedPages.length,
       header: mergedHeader,
-      lineItems: classifiedPages.flatMap((page) => page.draft.lineItems),
+      lineItems: ensureUniqueInvoiceLineItemIds(
+        classifiedPages.flatMap((page) => page.draft.lineItems),
+        slugifyText(primary.draft.header.invoiceNo || primary.draft.header.supplier),
+      ),
       markdownText: classifiedPages
         .map((page) => page.draft.markdownText.trim())
         .filter(Boolean)
@@ -99,4 +99,13 @@ function buildPageWiseRawResponse(
       rawResponse: page.rawResponse,
     })),
   })
+}
+
+function slugifyText(value: string) {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return slug || 'merged-page'
 }

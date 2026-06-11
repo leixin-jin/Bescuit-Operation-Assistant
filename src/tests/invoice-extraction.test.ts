@@ -20,14 +20,10 @@ import { classifyPageDrafts } from '@/lib/server/invoice-extraction/page-draft-c
 import { splitPdfIntoPageInputs } from '@/lib/server/invoice-extraction/pdf-page-plan'
 import type { InvoiceExtractionDraft } from '@/lib/server/invoice-extraction/schema'
 
-type HeaderWithTotals = InvoiceExtractionDraft['header'] & {
-  subtotalAmount: string
-  currency: string
-}
-
 function makeDraft(input: {
   invoiceNo: string
   totalAmount: string
+  lineItemId?: string
 }): InvoiceExtractionDraft {
   return {
     schemaVersion: 'invoice-extraction-v2',
@@ -43,7 +39,7 @@ function makeDraft(input: {
     },
     lineItems: [
       {
-        id: `item-${input.invoiceNo || 'blank'}`,
+        id: input.lineItemId ?? `item-${input.invoiceNo || 'blank'}`,
         name: 'Producto',
         qty: '1',
         unit: 'ud',
@@ -504,8 +500,10 @@ describe('invoice extraction helpers', () => {
 
       expect(result.additionalDrafts).toBeUndefined()
       expect(result.draft.header.invoiceNo).toBe('F-100')
+      expect(result.draft.header.subtotalAmount).toBe('100.00')
       expect(result.draft.header.taxAmount).toBe('20.00')
       expect(result.draft.header.totalAmount).toBe('120.00')
+      expect(result.draft.header.currency).toBe('EUR')
       expect(result.draft.pageCount).toBe(2)
       expect(result.draft.lineItems.map((item) => item.id)).toEqual(['item-1', 'item-2'])
       expect(result.draft.sourcePages).toEqual([
@@ -531,24 +529,47 @@ describe('invoice extraction helpers', () => {
       subtotalAmount: '40.00',
       taxAmount: '',
       currency: 'EUR',
-    } as HeaderWithTotals
+    }
     secondPage.header = {
       ...secondPage.header,
       subtotalAmount: '100.00',
       taxAmount: '20.00',
       currency: '',
-    } as HeaderWithTotals
+    }
 
     const result = splitPageDraftsIntoProviderResult([
       { pageNumber: 1, draft: firstPage, rawResponse: '{}' },
       { pageNumber: 2, draft: secondPage, rawResponse: '{}' },
     ])
 
-    const header = result.draft.header as HeaderWithTotals
+    const header = result.draft.header
     expect(header.subtotalAmount).toBe('100.00')
     expect(header.taxAmount).toBe('20.00')
     expect(header.totalAmount).toBe('120.00')
     expect(header.currency).toBe('EUR')
+  })
+
+  test('page-wise Gemini extraction dedupes merged line item ids from separate pages', () => {
+    const firstPage = makeDraft({
+      invoiceNo: 'F-100',
+      totalAmount: '',
+      lineItemId: 'item-1',
+    })
+    const secondPage = makeDraft({
+      invoiceNo: 'F-100',
+      totalAmount: '120.00',
+      lineItemId: 'item-1',
+    })
+
+    const result = splitPageDraftsIntoProviderResult([
+      { pageNumber: 1, draft: firstPage, rawResponse: '{}' },
+      { pageNumber: 2, draft: secondPage, rawResponse: '{}' },
+    ])
+
+    expect(result.draft.lineItems.map((item) => item.id)).toEqual([
+      'item-1',
+      'f-100-2',
+    ])
   })
 
   test('classifies page drafts with different invoice numbers as separate invoices', () => {

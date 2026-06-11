@@ -518,12 +518,18 @@ function normalizeHeaderDraft(
     invoiceNo:
       typeof value?.invoiceNo === 'string' ? value.invoiceNo : fallback.invoiceNo,
     date: typeof value?.date === 'string' ? value.date : fallback.date,
+    subtotalAmount:
+      typeof value?.subtotalAmount === 'string'
+        ? value.subtotalAmount
+        : fallback.subtotalAmount,
     totalAmount:
       typeof value?.totalAmount === 'string'
         ? value.totalAmount
         : fallback.totalAmount,
     taxAmount:
       typeof value?.taxAmount === 'string' ? value.taxAmount : fallback.taxAmount,
+    currency:
+      typeof value?.currency === 'string' ? value.currency : fallback.currency,
     notes: typeof value?.notes === 'string' ? value.notes : fallback.notes,
   }
 }

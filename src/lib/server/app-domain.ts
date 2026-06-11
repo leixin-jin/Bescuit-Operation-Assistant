@@ -52,8 +52,10 @@ export interface InvoiceHeaderDraft {
   customerAddress?: string
   invoiceNo: string
   date: string
+  subtotalAmount?: string
   totalAmount: string
   taxAmount: string
+  currency?: string
   notes: string
 }
 
