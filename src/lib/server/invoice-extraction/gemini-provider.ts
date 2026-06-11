@@ -2,7 +2,15 @@ import type {
   InvoiceExtractionProvider,
   InvoiceExtractionProviderResult,
 } from '@/lib/server/invoice-extraction/providers'
-import type { InvoicePdfInputMode } from '@/lib/server/invoice-extraction/file-input'
+import type {
+  InvoiceExtractionPageInput,
+  InvoiceExtractionProviderInput,
+  InvoicePdfInputMode,
+} from '@/lib/server/invoice-extraction/file-input'
+import {
+  splitPageDraftsIntoProviderResult,
+  type PageExtractionResult,
+} from '@/lib/server/invoice-extraction/pdf-page-plan'
 import {
   invoiceExtractionResponseJsonSchema,
   parseProviderExtractionResponse,
@@ -14,6 +22,9 @@ export interface GeminiProviderOptions {
   baseUrl?: string
   timeoutMs: number
   pdfInputMode?: InvoicePdfInputMode
+  splitPdfPages?: (
+    input: InvoiceExtractionProviderInput,
+  ) => Promise<InvoiceExtractionPageInput[]>
 }
 
 interface GeminiGenerateContentResponse {
@@ -36,51 +47,97 @@ export function createGeminiInvoiceExtractionProvider(
     model: options.model,
     pdfInputMode: options.pdfInputMode ?? 'native-pdf',
     async extract(input): Promise<InvoiceExtractionProviderResult> {
-      const response = await postGeminiGenerateContent(options, {
-        contents: [
+      if (
+        input.documentKind === 'pdf' &&
+        options.pdfInputMode === 'page-wise' &&
+        options.splitPdfPages
+      ) {
+        return extractPageWisePdf(options, input)
+      }
+
+      return extractSingleInput(options, input)
+    },
+  }
+}
+
+async function extractPageWisePdf(
+  options: GeminiProviderOptions,
+  input: InvoiceExtractionProviderInput,
+): Promise<InvoiceExtractionProviderResult> {
+  const pageInputs = await options.splitPdfPages?.(input)
+
+  if (!pageInputs || pageInputs.length <= 1) {
+    return extractSingleInput(options, input)
+  }
+
+  const pageResults: PageExtractionResult[] = []
+
+  for (const pageInput of pageInputs) {
+    const response = await requestGeminiExtraction(options, pageInput)
+    pageResults.push({
+      pageNumber: pageInput.pageNumber,
+      draft: response.draft,
+      rawResponse: response.rawResponse,
+    })
+  }
+
+  return splitPageDraftsIntoProviderResult(pageResults)
+}
+
+async function extractSingleInput(
+  options: GeminiProviderOptions,
+  input: InvoiceExtractionProviderInput,
+): Promise<InvoiceExtractionProviderResult> {
+  return requestGeminiExtraction(options, input)
+}
+
+async function requestGeminiExtraction(
+  options: GeminiProviderOptions,
+  input: InvoiceExtractionProviderInput,
+): Promise<InvoiceExtractionProviderResult> {
+  const response = await postGeminiGenerateContent(options, {
+    contents: [
+      {
+        parts: [
           {
-            parts: [
-              {
-                inline_data: {
-                  mime_type: input.mimeType,
-                  data: input.base64,
-                },
-              },
-              {
-                text: buildInvoiceExtractionPrompt(input.fileName, input.documentKind),
-              },
-            ],
+            inline_data: {
+              mime_type: input.mimeType,
+              data: input.base64,
+            },
+          },
+          {
+            text: buildInvoiceExtractionPrompt(input.fileName, input.documentKind),
           },
         ],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: invoiceExtractionResponseJsonSchema,
-        },
-      })
-      const rawJson = extractGeminiText(response)
-
-      return {
-        draft: parseProviderExtractionResponse({
-          rawJson,
-          fileName: input.fileName,
-          provider: 'gemini',
-          model: options.model,
-          documentKind: input.documentKind,
-        }),
-        rawResponse: JSON.stringify({
-          provider: 'gemini',
-          model: options.model,
-          candidates: response.candidates?.map((candidate) => ({
-            finishReason: candidate.finishReason,
-            text: candidate.content?.parts
-              ?.map((part) => part.text)
-              .filter(Boolean)
-              .join(''),
-          })),
-          promptFeedback: response.promptFeedback ?? null,
-        }),
-      }
+      },
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: invoiceExtractionResponseJsonSchema,
     },
+  })
+  const rawJson = extractGeminiText(response)
+
+  return {
+    draft: parseProviderExtractionResponse({
+      rawJson,
+      fileName: input.fileName,
+      provider: 'gemini',
+      model: options.model,
+      documentKind: input.documentKind,
+    }),
+    rawResponse: JSON.stringify({
+      provider: 'gemini',
+      model: options.model,
+      candidates: response.candidates?.map((candidate) => ({
+        finishReason: candidate.finishReason,
+        text: candidate.content?.parts
+          ?.map((part) => part.text)
+          .filter(Boolean)
+          .join(''),
+      })),
+      promptFeedback: response.promptFeedback ?? null,
+    }),
   }
 }
 

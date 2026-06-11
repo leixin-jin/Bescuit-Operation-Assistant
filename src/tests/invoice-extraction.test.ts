@@ -144,6 +144,102 @@ describe('invoice extraction helpers', () => {
     expect(provider).toHaveProperty('pdfInputMode', 'page-wise')
   })
 
+  test('page-wise Gemini extraction sends one request per PDF page input', async () => {
+    const responseFor = (invoiceNo: string, totalAmount: string, pageNumber: number) => ({
+      schemaVersion: 'invoice-extraction-v2',
+      pageCount: 1,
+      documentKind: 'pdf',
+      sourcePages: [{ pageNumber, kind: 'pdf-page' }],
+      header: {
+        supplier: 'Emcadi S.A.',
+        invoiceNo,
+        date: '2026-05-31',
+        subtotalAmount: '',
+        taxAmount: '',
+        totalAmount,
+        currency: 'EUR',
+        notes: '',
+      },
+      lineItems: [
+        {
+          id: `item-${pageNumber}`,
+          name: `Page ${pageNumber} item`,
+          qty: '1',
+          unit: 'ud',
+          unitPrice: totalAmount,
+          lineTotal: totalAmount,
+          ingredient: '',
+          matched: false,
+        },
+      ],
+      confidence: { overall: 0.9, header: 0.9, lineItems: 0.9, totals: 0.9 },
+      warnings: [],
+    })
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: JSON.stringify(responseFor('2605A008462', '769.22', 1)) }] } }],
+        })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: JSON.stringify(responseFor('2605A008463', '733.15', 2)) }] } }],
+        })),
+      )
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const provider = createGeminiInvoiceExtractionProvider({
+        apiKey: 'test-key',
+        model: 'gemini-3.5-flash',
+        timeoutMs: 1000,
+        pdfInputMode: 'page-wise',
+        splitPdfPages: async () => [
+          {
+            fileName: '2605A008462-2605A008463.PDF',
+            mimeType: 'application/pdf',
+            arrayBuffer: new TextEncoder().encode('page-1').buffer,
+            size: 6,
+            base64: 'cGFnZS0x',
+            dataUrl: 'data:application/pdf;base64,cGFnZS0x',
+            documentKind: 'pdf',
+            pageNumber: 1,
+          },
+          {
+            fileName: '2605A008462-2605A008463.PDF',
+            mimeType: 'application/pdf',
+            arrayBuffer: new TextEncoder().encode('page-2').buffer,
+            size: 6,
+            base64: 'cGFnZS0y',
+            dataUrl: 'data:application/pdf;base64,cGFnZS0y',
+            documentKind: 'pdf',
+            pageNumber: 2,
+          },
+        ],
+      })
+
+      const result = await provider.extract({
+        fileName: '2605A008462-2605A008463.PDF',
+        mimeType: 'application/pdf',
+        arrayBuffer: new TextEncoder().encode('whole-pdf').buffer,
+        size: 9,
+        base64: 'd2hvbGUtcGRm',
+        dataUrl: 'data:application/pdf;base64,d2hvbGUtcGRm',
+        documentKind: 'pdf',
+      })
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(result.draft.header.invoiceNo).toBe('2605A008462')
+      expect(result.additionalDrafts).toHaveLength(1)
+      expect(result.additionalDrafts?.[0]?.draft.header.invoiceNo).toBe('2605A008463')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   test('rejects provider JSON that does not match v2 schema', () => {
     expect(() =>
       parseProviderExtractionResponse({

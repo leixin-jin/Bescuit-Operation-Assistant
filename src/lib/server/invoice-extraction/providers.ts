@@ -10,6 +10,11 @@ import type { InvoiceExtractionDraft } from '@/lib/server/invoice-extraction/sch
 export interface InvoiceExtractionProviderResult {
   draft: InvoiceExtractionDraft
   rawResponse: string | null
+  additionalDrafts?: Array<{
+    pageNumber: number
+    draft: InvoiceExtractionDraft
+    rawResponse: string | null
+  }>
 }
 
 export interface InvoiceExtractionProvider {
