@@ -5,6 +5,7 @@ import type {
 } from '@/lib/server/invoice-extraction/file-input'
 import { createGeminiInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/gemini-provider'
 import { createHeuristicInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/heuristic-provider'
+import { splitPdfIntoPageInputs } from '@/lib/server/invoice-extraction/pdf-page-plan'
 import type { InvoiceExtractionDraft } from '@/lib/server/invoice-extraction/schema'
 
 export interface InvoiceExtractionProviderResult {
@@ -45,6 +46,7 @@ export function selectInvoiceExtractionProvider(
       baseUrl: env.GEMINI_API_BASE_URL,
       timeoutMs: parsePositiveInteger(env.INVOICE_EXTRACTION_TIMEOUT_MS) ?? 60_000,
       pdfInputMode: normalizePdfInputMode(env.INVOICE_PDF_INPUT_MODE),
+      splitPdfPages: splitPdfIntoPageInputs,
     }
 
     return createGeminiInvoiceExtractionProvider(geminiOptions)

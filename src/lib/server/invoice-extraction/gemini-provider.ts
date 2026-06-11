@@ -73,12 +73,19 @@ async function extractPageWisePdf(
   const pageResults: PageExtractionResult[] = []
 
   for (const pageInput of pageInputs) {
-    const response = await requestGeminiExtraction(options, pageInput)
-    pageResults.push({
-      pageNumber: pageInput.pageNumber,
-      draft: response.draft,
-      rawResponse: response.rawResponse,
-    })
+    try {
+      const response = await requestGeminiExtraction(options, pageInput)
+      pageResults.push({
+        pageNumber: pageInput.pageNumber,
+        draft: response.draft,
+        rawResponse: response.rawResponse,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(
+        `Gemini invoice extraction failed for PDF page ${pageInput.pageNumber}: ${message}`,
+      )
+    }
   }
 
   return splitPageDraftsIntoProviderResult(pageResults)

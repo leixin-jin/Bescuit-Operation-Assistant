@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
+import { PDFDocument } from 'pdf-lib'
 
 import {
   buildInvoiceProviderInput,
@@ -14,6 +15,7 @@ import {
 } from '@/lib/server/extraction'
 import { getInvoiceJobStage, getInvoiceStatusLabel, isInvoiceJobProcessing } from '@/lib/server/app-domain'
 import { createGeminiInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/gemini-provider'
+import { splitPdfIntoPageInputs } from '@/lib/server/invoice-extraction/pdf-page-plan'
 
 describe('invoice extraction helpers', () => {
   test('sends Gemini structured output fields accepted by generateContent REST API', async () => {
@@ -120,6 +122,34 @@ describe('invoice extraction helpers', () => {
     expect(input).not.toHaveProperty('markdownText')
   })
 
+  test('splits a PDF into one provider input per page', async () => {
+    const pdf = await PDFDocument.create()
+    pdf.addPage([100, 100])
+    pdf.addPage([100, 100])
+    const pdfBytes = await pdf.save()
+    const arrayBuffer = uint8ArrayToArrayBuffer(pdfBytes)
+    const input = await buildInvoiceProviderInput({
+      fileName: 'two-page.pdf',
+      mimeType: 'application/pdf',
+      arrayBuffer,
+    })
+
+    const pages = await splitPdfIntoPageInputs(input)
+
+    expect(pages).toHaveLength(2)
+    expect(pages.map((page) => page.pageNumber)).toEqual([1, 2])
+    for (const page of pages) {
+      expect(page.fileName).toBe('two-page.pdf')
+      expect(page.mimeType).toBe('application/pdf')
+      expect(page.documentKind).toBe('pdf')
+      expect(page.size).toBe(page.arrayBuffer.byteLength)
+      expect(page.base64.length).toBeGreaterThan(0)
+      expect(page.dataUrl).toBe(`data:application/pdf;base64,${page.base64}`)
+      const pagePdf = await PDFDocument.load(page.arrayBuffer)
+      expect(pagePdf.getPageCount()).toBe(1)
+    }
+  })
+
   test('selects Gemini provider from configured extraction env', () => {
     const provider = selectInvoiceExtractionProvider({
       INVOICE_EXTRACTION_PROVIDER: 'gemini',
@@ -142,6 +172,79 @@ describe('invoice extraction helpers', () => {
     expect(provider.id).toBe('gemini')
     expect(provider.model).toBe('gemini-3.5-flash')
     expect(provider).toHaveProperty('pdfInputMode', 'page-wise')
+  })
+
+  test('selected page-wise Gemini provider splits PDF pages by default', async () => {
+    const responseFor = (invoiceNo: string, pageNumber: number) => ({
+      schemaVersion: 'invoice-extraction-v2',
+      pageCount: 1,
+      documentKind: 'pdf',
+      sourcePages: [{ pageNumber, kind: 'pdf-page' }],
+      header: {
+        supplier: 'Emcadi S.A.',
+        invoiceNo,
+        date: '2026-05-31',
+        subtotalAmount: '',
+        taxAmount: '',
+        totalAmount: '1.00',
+        currency: 'EUR',
+        notes: '',
+      },
+      lineItems: [
+        {
+          id: `item-${pageNumber}`,
+          name: `Page ${pageNumber} item`,
+          qty: '1',
+          unit: 'ud',
+          unitPrice: '1.00',
+          lineTotal: '1.00',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+      confidence: { overall: 0.9, header: 0.9, lineItems: 0.9, totals: 0.9 },
+      warnings: [],
+    })
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: JSON.stringify(responseFor('page-1', 1)) }] } }],
+        })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: JSON.stringify(responseFor('page-2', 2)) }] } }],
+        })),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const provider = selectInvoiceExtractionProvider({
+        INVOICE_EXTRACTION_PROVIDER: 'gemini',
+        INVOICE_EXTRACTION_MODEL: 'gemini-3.5-flash',
+        INVOICE_PDF_INPUT_MODE: 'page-wise',
+        GEMINI_API_KEY: 'test-key',
+      })
+      const pdf = await PDFDocument.create()
+      pdf.addPage([100, 100])
+      pdf.addPage([100, 100])
+      const pdfBytes = await pdf.save()
+      const arrayBuffer = uint8ArrayToArrayBuffer(pdfBytes)
+      const input = await buildInvoiceProviderInput({
+        fileName: 'two-page.pdf',
+        mimeType: 'application/pdf',
+        arrayBuffer,
+      })
+
+      const result = await provider.extract(input)
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(result.draft.header.invoiceNo).toBe('page-1')
+      expect(result.additionalDrafts?.[0]?.draft.header.invoiceNo).toBe('page-2')
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   test('page-wise Gemini extraction sends one request per PDF page input', async () => {
@@ -232,9 +335,103 @@ describe('invoice extraction helpers', () => {
       })
 
       expect(fetchMock).toHaveBeenCalledTimes(2)
+      const firstRequestBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)
+      const secondRequestBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string)
+      expect(firstRequestBody.contents[0].parts[0].inline_data.data).toBe('cGFnZS0x')
+      expect(secondRequestBody.contents[0].parts[0].inline_data.data).toBe('cGFnZS0y')
       expect(result.draft.header.invoiceNo).toBe('2605A008462')
       expect(result.additionalDrafts).toHaveLength(1)
       expect(result.additionalDrafts?.[0]?.draft.header.invoiceNo).toBe('2605A008463')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  test('page-wise Gemini extraction includes page number when a page fails schema validation', async () => {
+    const validResponse = {
+      schemaVersion: 'invoice-extraction-v2',
+      pageCount: 1,
+      documentKind: 'pdf',
+      sourcePages: [{ pageNumber: 1, kind: 'pdf-page' }],
+      header: {
+        supplier: 'Emcadi S.A.',
+        invoiceNo: '2605A008462',
+        date: '2026-05-31',
+        subtotalAmount: '',
+        taxAmount: '',
+        totalAmount: '769.22',
+        currency: 'EUR',
+        notes: '',
+      },
+      lineItems: [
+        {
+          id: 'item-1',
+          name: 'Page 1 item',
+          qty: '1',
+          unit: 'ud',
+          unitPrice: '769.22',
+          lineTotal: '769.22',
+          ingredient: '',
+          matched: false,
+        },
+      ],
+      confidence: { overall: 0.9, header: 0.9, lineItems: 0.9, totals: 0.9 },
+      warnings: [],
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: JSON.stringify(validResponse) }] } }],
+        })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: JSON.stringify({ schemaVersion: 'invoice-extraction-v2' }) }] } }],
+        })),
+      )
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const provider = createGeminiInvoiceExtractionProvider({
+        apiKey: 'test-key',
+        model: 'gemini-3.5-flash',
+        timeoutMs: 1000,
+        pdfInputMode: 'page-wise',
+        splitPdfPages: async () => [
+          {
+            fileName: 'two-page.pdf',
+            mimeType: 'application/pdf',
+            arrayBuffer: new TextEncoder().encode('page-1').buffer,
+            size: 6,
+            base64: 'cGFnZS0x',
+            dataUrl: 'data:application/pdf;base64,cGFnZS0x',
+            documentKind: 'pdf',
+            pageNumber: 1,
+          },
+          {
+            fileName: 'two-page.pdf',
+            mimeType: 'application/pdf',
+            arrayBuffer: new TextEncoder().encode('page-2').buffer,
+            size: 6,
+            base64: 'cGFnZS0y',
+            dataUrl: 'data:application/pdf;base64,cGFnZS0y',
+            documentKind: 'pdf',
+            pageNumber: 2,
+          },
+        ],
+      })
+
+      await expect(provider.extract({
+        fileName: 'two-page.pdf',
+        mimeType: 'application/pdf',
+        arrayBuffer: new TextEncoder().encode('whole-pdf').buffer,
+        size: 9,
+        base64: 'd2hvbGUtcGRm',
+        dataUrl: 'data:application/pdf;base64,d2hvbGUtcGRm',
+        documentKind: 'pdf',
+      })).rejects.toThrow(/PDF page 2/)
     } finally {
       vi.unstubAllGlobals()
     }
@@ -911,3 +1108,9 @@ Total: 87,40
     expect(getInvoiceStatusLabel('error')).toBe('处理失败')
   })
 })
+
+function uint8ArrayToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const arrayBuffer = new ArrayBuffer(bytes.byteLength)
+  new Uint8Array(arrayBuffer).set(bytes)
+  return arrayBuffer
+}
