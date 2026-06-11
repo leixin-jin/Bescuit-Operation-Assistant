@@ -15,6 +15,7 @@ export interface InvoiceExtractionProviderResult {
 export interface InvoiceExtractionProvider {
   id: string
   model: string
+  pdfInputMode?: InvoicePdfInputMode
   extract(input: InvoiceExtractionProviderInput): Promise<InvoiceExtractionProviderResult>
 }
 
@@ -33,9 +34,7 @@ export function selectInvoiceExtractionProvider(
       throw new Error('Missing GEMINI_API_KEY for Gemini invoice extraction provider')
     }
 
-    const geminiOptions: Parameters<typeof createGeminiInvoiceExtractionProvider>[0] & {
-      pdfInputMode: InvoicePdfInputMode
-    } = {
+    const geminiOptions: Parameters<typeof createGeminiInvoiceExtractionProvider>[0] = {
       apiKey: env.GEMINI_API_KEY,
       model,
       baseUrl: env.GEMINI_API_BASE_URL,

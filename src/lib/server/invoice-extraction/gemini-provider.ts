@@ -2,16 +2,18 @@ import type {
   InvoiceExtractionProvider,
   InvoiceExtractionProviderResult,
 } from '@/lib/server/invoice-extraction/providers'
+import type { InvoicePdfInputMode } from '@/lib/server/invoice-extraction/file-input'
 import {
   invoiceExtractionResponseJsonSchema,
   parseProviderExtractionResponse,
 } from '@/lib/server/invoice-extraction/schema'
 
-interface GeminiProviderOptions {
+export interface GeminiProviderOptions {
   apiKey: string
   model: string
   baseUrl?: string
   timeoutMs: number
+  pdfInputMode?: InvoicePdfInputMode
 }
 
 interface GeminiGenerateContentResponse {
@@ -32,6 +34,7 @@ export function createGeminiInvoiceExtractionProvider(
   return {
     id: 'gemini',
     model: options.model,
+    pdfInputMode: options.pdfInputMode ?? 'native-pdf',
     async extract(input): Promise<InvoiceExtractionProviderResult> {
       const response = await postGeminiGenerateContent(options, {
         contents: [

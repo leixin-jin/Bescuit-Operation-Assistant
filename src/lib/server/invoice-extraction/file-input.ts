@@ -13,6 +13,7 @@ export interface InvoiceExtractionProviderInput {
 }
 
 export interface InvoiceExtractionPageInput extends InvoiceExtractionProviderInput {
+  /** 1-based page number from the source PDF. */
   pageNumber: number
 }
 

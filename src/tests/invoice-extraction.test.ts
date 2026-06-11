@@ -141,6 +141,7 @@ describe('invoice extraction helpers', () => {
 
     expect(provider.id).toBe('gemini')
     expect(provider.model).toBe('gemini-3.5-flash')
+    expect(provider).toHaveProperty('pdfInputMode', 'page-wise')
   })
 
   test('rejects provider JSON that does not match v2 schema', () => {
