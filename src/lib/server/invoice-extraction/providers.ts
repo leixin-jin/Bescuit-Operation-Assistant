@@ -1,5 +1,8 @@
 import type { AppBindings } from '@/lib/server/bindings'
-import type { InvoiceExtractionProviderInput } from '@/lib/server/invoice-extraction/file-input'
+import type {
+  InvoiceExtractionProviderInput,
+  InvoicePdfInputMode,
+} from '@/lib/server/invoice-extraction/file-input'
 import { createGeminiInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/gemini-provider'
 import { createHeuristicInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/heuristic-provider'
 import type { InvoiceExtractionDraft } from '@/lib/server/invoice-extraction/schema'
@@ -30,12 +33,17 @@ export function selectInvoiceExtractionProvider(
       throw new Error('Missing GEMINI_API_KEY for Gemini invoice extraction provider')
     }
 
-    return createGeminiInvoiceExtractionProvider({
+    const geminiOptions: Parameters<typeof createGeminiInvoiceExtractionProvider>[0] & {
+      pdfInputMode: InvoicePdfInputMode
+    } = {
       apiKey: env.GEMINI_API_KEY,
       model,
       baseUrl: env.GEMINI_API_BASE_URL,
       timeoutMs: parsePositiveInteger(env.INVOICE_EXTRACTION_TIMEOUT_MS) ?? 60_000,
-    })
+      pdfInputMode: normalizePdfInputMode(env.INVOICE_PDF_INPUT_MODE),
+    }
+
+    return createGeminiInvoiceExtractionProvider(geminiOptions)
   }
 
   return createHeuristicInvoiceExtractionProvider({ model })
@@ -54,6 +62,10 @@ function normalizeProviderId(value: string | undefined): InvoiceExtractionProvid
     default:
       throw new Error(`Unsupported invoice extraction provider: ${value}`)
   }
+}
+
+function normalizePdfInputMode(value: string | undefined): InvoicePdfInputMode {
+  return value?.trim() === 'page-wise' ? 'page-wise' : 'native-pdf'
 }
 
 function parsePositiveInteger(value: string | undefined) {

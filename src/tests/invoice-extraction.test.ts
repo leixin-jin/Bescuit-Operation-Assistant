@@ -131,6 +131,18 @@ describe('invoice extraction helpers', () => {
     expect(provider.model).toBe('gemini-3.5-flash')
   })
 
+  test('selects Gemini provider with page-wise PDF mode enabled', () => {
+    const provider = selectInvoiceExtractionProvider({
+      INVOICE_EXTRACTION_PROVIDER: 'gemini',
+      INVOICE_EXTRACTION_MODEL: 'gemini-3.5-flash',
+      INVOICE_PDF_INPUT_MODE: 'page-wise',
+      GEMINI_API_KEY: 'test-key',
+    })
+
+    expect(provider.id).toBe('gemini')
+    expect(provider.model).toBe('gemini-3.5-flash')
+  })
+
   test('rejects provider JSON that does not match v2 schema', () => {
     expect(() =>
       parseProviderExtractionResponse({

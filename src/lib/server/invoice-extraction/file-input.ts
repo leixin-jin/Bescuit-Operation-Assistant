@@ -1,5 +1,7 @@
 export type InvoiceDocumentKind = 'pdf' | 'image' | 'mixed' | 'unknown'
 
+export type InvoicePdfInputMode = 'native-pdf' | 'page-wise'
+
 export interface InvoiceExtractionProviderInput {
   fileName: string
   mimeType: string
@@ -8,6 +10,10 @@ export interface InvoiceExtractionProviderInput {
   base64: string
   dataUrl: string
   documentKind: InvoiceDocumentKind
+}
+
+export interface InvoiceExtractionPageInput extends InvoiceExtractionProviderInput {
+  pageNumber: number
 }
 
 export async function buildInvoiceProviderInput(input: {
