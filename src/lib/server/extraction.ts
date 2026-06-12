@@ -15,7 +15,10 @@ import {
   buildInvoiceProviderInput,
   type InvoiceDocumentKind,
 } from '@/lib/server/invoice-extraction/file-input'
-import { selectInvoiceExtractionProvider } from '@/lib/server/invoice-extraction/providers'
+import {
+  selectInvoiceExtractionProvider,
+  type InvoiceExtractionProviderResult,
+} from '@/lib/server/invoice-extraction/providers'
 import {
   INVOICE_EXTRACTION_SCHEMA_VERSION,
   parseProviderExtractionResponse as parseProviderExtractionResponseFromSchema,
@@ -251,6 +254,118 @@ export function extractInvoiceReviewDraft(input: {
   }
 }
 
+type AdditionalInvoiceExtractionDraft =
+  NonNullable<InvoiceExtractionProviderResult['additionalDrafts']>[number]
+
+export async function persistAdditionalInvoiceExtractionDrafts(input: {
+  db: D1Database | NonNullable<ReturnType<typeof getDb>>
+  originalJobId: string
+  sourceDocumentId: string
+  providerId: string
+  providerModel: string
+  createdAt: string
+  additionalDrafts: AdditionalInvoiceExtractionDraft[]
+  allowReadyOverwrite?: boolean
+}) {
+  const db = '$client' in input.db ? input.db.$client : input.db
+  const readyOverwriteClause = input.allowReadyOverwrite
+    ? '1 = 1 /* allow-ready-overwrite */'
+    : "intake_jobs.stage != 'ready'"
+  const extractionInsertGuardClause = input.allowReadyOverwrite
+    ? '1 = 1 /* allow-ready-overwrite */'
+    : `NOT EXISTS (
+            SELECT 1
+            FROM intake_jobs
+            WHERE intake_jobs.id = ?
+              AND intake_jobs.stage = 'ready'
+          )`
+  const extractionReadyOverwriteClause = input.allowReadyOverwrite
+    ? '1 = 1 /* allow-ready-overwrite */'
+    : `EXISTS (
+            SELECT 1
+            FROM intake_jobs
+            WHERE intake_jobs.id = extraction_results.intake_job_id
+              AND intake_jobs.stage != 'ready'
+          )`
+
+  for (const additional of input.additionalDrafts) {
+    const siblingJobId = `${input.originalJobId}_p${additional.pageNumber}`
+    const draft = withPriceTrackingDefaults(additional.draft)
+    const schemaVersion = draft.schemaVersion ?? INVOICE_EXTRACTION_SCHEMA_VERSION
+
+    await db
+      .prepare(
+        `/* invoice:persist-additional-intake-job */
+        INSERT INTO intake_jobs (
+          id,
+          source_document_id,
+          extractor_provider,
+          extractor_model,
+          stage,
+          confidence_score,
+          error_message,
+          created_at,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, 'needs_review', ?, NULL, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          extractor_provider = excluded.extractor_provider,
+          extractor_model = excluded.extractor_model,
+          stage = excluded.stage,
+          confidence_score = excluded.confidence_score,
+          error_message = excluded.error_message,
+          updated_at = excluded.updated_at
+        WHERE ${readyOverwriteClause}`,
+      )
+      .bind(
+        siblingJobId,
+        input.sourceDocumentId,
+        input.providerId,
+        input.providerModel,
+        calculateDraftConfidence(draft),
+        input.createdAt,
+        input.createdAt,
+      )
+      .run()
+
+    await db
+      .prepare(
+        `/* invoice:persist-additional-extraction */
+        INSERT INTO extraction_results (
+          id,
+          intake_job_id,
+          markdown_text,
+          structured_json,
+          raw_response,
+          schema_version,
+          created_at
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?
+        WHERE ${extractionInsertGuardClause}
+        ON CONFLICT(id) DO UPDATE SET
+          markdown_text = excluded.markdown_text,
+          structured_json = excluded.structured_json,
+          raw_response = excluded.raw_response,
+          schema_version = excluded.schema_version,
+          created_at = excluded.created_at
+        WHERE ${extractionReadyOverwriteClause}`,
+      )
+      .bind(
+        ...[
+          getExtractionResultId(siblingJobId),
+          siblingJobId,
+          draft.markdownText,
+          serializeExtractionDraft(draft),
+          additional.rawResponse,
+          schemaVersion,
+          input.createdAt,
+          ...(input.allowReadyOverwrite ? [] : [siblingJobId]),
+        ],
+      )
+      .run()
+  }
+}
+
 export async function processInvoiceIntakeQueueMessage(
   env: AppBindings,
   message: InvoiceIntakeQueueMessage,
@@ -367,6 +482,18 @@ export async function processInvoiceIntakeQueueMessage(
 
     if ((extractionResult.meta?.changes ?? 0) === 0) {
       return getCurrentQueueStage(db, message.jobId)
+    }
+
+    if (extraction.additionalDrafts?.length) {
+      await persistAdditionalInvoiceExtractionDrafts({
+        db,
+        originalJobId: message.jobId,
+        sourceDocumentId: message.sourceDocumentId,
+        providerId: provider.id,
+        providerModel: provider.model,
+        createdAt: extractionStoredAt,
+        additionalDrafts: extraction.additionalDrafts,
+      })
     }
 
     const finishedAt = new Date().toISOString()
@@ -518,12 +645,18 @@ function normalizeHeaderDraft(
     invoiceNo:
       typeof value?.invoiceNo === 'string' ? value.invoiceNo : fallback.invoiceNo,
     date: typeof value?.date === 'string' ? value.date : fallback.date,
+    subtotalAmount:
+      typeof value?.subtotalAmount === 'string'
+        ? value.subtotalAmount
+        : fallback.subtotalAmount,
     totalAmount:
       typeof value?.totalAmount === 'string'
         ? value.totalAmount
         : fallback.totalAmount,
     taxAmount:
       typeof value?.taxAmount === 'string' ? value.taxAmount : fallback.taxAmount,
+    currency:
+      typeof value?.currency === 'string' ? value.currency : fallback.currency,
     notes: typeof value?.notes === 'string' ? value.notes : fallback.notes,
   }
 }

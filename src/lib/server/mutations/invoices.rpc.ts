@@ -18,6 +18,7 @@ import {
   getExtractionResultId,
   mapIntakeStageToInvoiceStatus,
   parseStoredExtractionDraft,
+  persistAdditionalInvoiceExtractionDrafts,
   selectInvoiceExtractionProvider,
   serializeExtractionDraft,
   type InvoiceExtractionDraft,
@@ -57,6 +58,11 @@ interface DeletableIntakeJobRow {
   stage: string
   sourceDocumentId: string
   r2Key: string | null
+}
+
+interface RecheckSiblingRow {
+  jobId: string
+  stage: string
 }
 
 export const uploadInvoiceIntakeDocument = createServerFn({ method: 'POST' })
@@ -207,7 +213,21 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     throw new Error('已完成的发票任务不能从最近任务中删除。')
   }
 
-  if (row.r2Key) {
+  const [{ referenceCount: preDeleteReferenceCount } = { referenceCount: 0 }] =
+    await allD1<{
+      referenceCount: number
+    }>(
+      db,
+      `/* invoice:delete-source-reference-count */
+      SELECT COUNT(*) AS referenceCount
+      FROM intake_jobs
+      WHERE source_document_id = ?
+        AND id != ?`,
+      [row.sourceDocumentId, row.jobId],
+    )
+  const isAlreadyLastSourceJob = Number(preDeleteReferenceCount) === 0
+
+  if (row.r2Key && isAlreadyLastSourceJob) {
     const documentsBucket = rawDocumentsBucket
 
     if (!documentsBucket) {
@@ -228,6 +248,20 @@ export async function deleteInvoiceIntakeJobFromDatabase(
         .run()
       throw error
     }
+  }
+
+  const verifyClaimResult = await db
+    .prepare(
+      `/* invoice:delete-intake-verify-claim */
+      UPDATE intake_jobs
+      SET stage = 'deleting'
+      WHERE id = ? AND stage = 'deleting'`,
+    )
+    .bind(row.jobId)
+    .run()
+
+  if ((verifyClaimResult.meta?.changes ?? 0) !== 1) {
+    throw new Error('发票任务删除状态已变化，不能完成删除。')
   }
 
   await db
@@ -252,14 +286,61 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     throw new Error('发票任务删除状态已变化，不能完成删除。')
   }
 
-  await db
-    .prepare(
-      `/* invoice:delete-source-document */
-      DELETE FROM source_documents
-      WHERE id = ?`,
-    )
-    .bind(row.sourceDocumentId)
-    .run()
+  const isLastSourceJob = isAlreadyLastSourceJob
+    ? true
+    : Number(
+        (
+          await allD1<{ referenceCount: number }>(
+            db,
+            `/* invoice:delete-source-reference-count */
+            SELECT COUNT(*) AS referenceCount
+            FROM intake_jobs
+            WHERE source_document_id = ?`,
+            [row.sourceDocumentId],
+          )
+        )[0]?.referenceCount ?? 0,
+      ) === 0
+
+  if (row.r2Key && isLastSourceJob && !isAlreadyLastSourceJob) {
+    const documentsBucket = rawDocumentsBucket
+
+    if (!documentsBucket) {
+      throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
+    }
+
+    try {
+      await documentsBucket.delete(row.r2Key)
+    } catch (error) {
+      const now = new Date().toISOString()
+      await db
+        .prepare(
+          `/* invoice:delete-intake-recreate-cleanup-job */
+          INSERT INTO intake_jobs (
+            id,
+            source_document_id,
+            stage,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO NOTHING`,
+        )
+        .bind(row.jobId, row.sourceDocumentId, 'deleting', now, now)
+        .run()
+      throw error
+    }
+  }
+
+  if (isLastSourceJob) {
+    await db
+      .prepare(
+        `/* invoice:delete-source-document */
+        DELETE FROM source_documents
+        WHERE id = ?`,
+      )
+      .bind(row.sourceDocumentId)
+      .run()
+  }
 
   return {
     ok: true,
@@ -392,7 +473,42 @@ export async function recheckInvoiceReviewJobInDatabase(
 
     assertInvoiceMutationChanged(extractionResult, '发票任务状态已变化，不能保存重新核对结果。')
 
-    await deleteConfirmedInvoiceAccountingRows(db, row.jobId)
+    const additionalDrafts = extraction.additionalDrafts ?? []
+    const currentSiblingJobIds = additionalDrafts.map(
+      (additional) => `${row.jobId}_p${additional.pageNumber}`,
+    )
+    const currentSiblingJobIdSet = new Set(currentSiblingJobIds)
+    const staleNonReadySiblingJobIds = (
+      await listRecheckSiblingRows(db, {
+        originalJobId: row.jobId,
+        sourceDocumentId: row.sourceDocumentId,
+      })
+    )
+      .filter(
+        (sibling) =>
+          !currentSiblingJobIdSet.has(sibling.jobId) && sibling.stage !== 'ready',
+      )
+      .map((sibling) => sibling.jobId)
+
+    await deleteConfirmedInvoiceAccountingRowsForJobs(db, [
+      row.jobId,
+      ...currentSiblingJobIds,
+    ])
+
+    if (additionalDrafts.length) {
+      await persistAdditionalInvoiceExtractionDrafts({
+        db,
+        originalJobId: row.jobId,
+        sourceDocumentId: row.sourceDocumentId,
+        providerId: provider.id,
+        providerModel: provider.model,
+        createdAt: extractionStoredAt,
+        additionalDrafts,
+        allowReadyOverwrite: true,
+      })
+    }
+
+    await retireStaleNonReadyRecheckSiblings(db, staleNonReadySiblingJobIds)
 
     const finishedAt = new Date().toISOString()
     const successResult = await db
@@ -579,31 +695,80 @@ async function persistInvoiceReviewDraft(
   }
 }
 
-async function deleteConfirmedInvoiceAccountingRows(db: D1Database, jobId: string) {
-  const invoiceId = getInvoiceId(jobId)
-  const ledgerEntryId = getLedgerEntryId(invoiceId)
+async function listRecheckSiblingRows(
+  db: D1Database,
+  input: {
+    originalJobId: string
+    sourceDocumentId: string
+  },
+) {
+  return allD1<RecheckSiblingRow>(
+    db,
+    `/* invoice:recheck-list-siblings */
+    SELECT id AS jobId, stage
+    FROM intake_jobs
+    WHERE source_document_id = ?
+      AND id LIKE ? ESCAPE '\\'`,
+    [input.sourceDocumentId, `${escapeSqlLike(input.originalJobId)}\\_p%`],
+  )
+}
+
+async function deleteConfirmedInvoiceAccountingRowsForJobs(
+  db: D1Database,
+  jobIds: string[],
+) {
+  if (jobIds.length === 0) {
+    return
+  }
+
+  const placeholders = jobIds.map(() => '?').join(', ')
+  const invoiceRows = await allD1<InvoiceIdRow>(
+    db,
+    `/* invoice:recheck-list-accounting-invoices */
+    SELECT id
+    FROM invoices
+    WHERE intake_job_id IN (${placeholders})`,
+    jobIds,
+  )
+  const invoiceIds = Array.from(
+    new Set([...invoiceRows.map((row) => row.id), ...jobIds.map(getInvoiceId)]),
+  )
+
+  if (invoiceIds.length === 0) {
+    return
+  }
+
+  await deleteConfirmedInvoiceAccountingRows(db, invoiceIds)
+}
+
+async function deleteConfirmedInvoiceAccountingRows(
+  db: D1Database,
+  invoiceIds: string[],
+) {
+  const placeholders = invoiceIds.map(() => '?').join(', ')
   const statements = [
     db
       .prepare(
         `/* invoice:recheck-delete-ledger */
         DELETE FROM ledger_entries
-        WHERE id = ?`,
+        WHERE source_kind = 'invoice'
+          AND source_id IN (${placeholders})`,
       )
-      .bind(ledgerEntryId),
+      .bind(...invoiceIds),
     db
       .prepare(
         `/* invoice:recheck-delete-items */
         DELETE FROM invoice_items
-        WHERE invoice_id = ?`,
+        WHERE invoice_id IN (${placeholders})`,
       )
-      .bind(invoiceId),
+      .bind(...invoiceIds),
     db
       .prepare(
         `/* invoice:recheck-delete-invoice */
         DELETE FROM invoices
-        WHERE id = ?`,
+        WHERE id IN (${placeholders})`,
       )
-      .bind(invoiceId),
+      .bind(...invoiceIds),
   ]
 
   if (typeof db.batch === 'function') {
@@ -614,6 +779,46 @@ async function deleteConfirmedInvoiceAccountingRows(db: D1Database, jobId: strin
   for (const statement of statements) {
     await statement.run()
   }
+}
+
+function escapeSqlLike(value: string) {
+  return value.replace(/[\\%_]/g, (character) => `\\${character}`)
+}
+
+async function retireStaleNonReadyRecheckSiblings(
+  db: D1Database,
+  siblingJobIds: string[],
+) {
+  if (siblingJobIds.length === 0) {
+    return
+  }
+
+  const placeholders = siblingJobIds.map(() => '?').join(', ')
+
+  await db
+    .prepare(
+      `/* invoice:recheck-retire-stale-sibling-extractions */
+      DELETE FROM extraction_results
+      WHERE intake_job_id IN (${placeholders})
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = extraction_results.intake_job_id
+            AND intake_jobs.stage != 'ready'
+        )`,
+    )
+    .bind(...siblingJobIds)
+    .run()
+
+  await db
+    .prepare(
+      `/* invoice:recheck-retire-stale-sibling-jobs */
+      DELETE FROM intake_jobs
+      WHERE id IN (${placeholders})
+        AND stage != 'ready'`,
+    )
+    .bind(...siblingJobIds)
+    .run()
 }
 
 function buildRecheckedInvoiceJob(input: {

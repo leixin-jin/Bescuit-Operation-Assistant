@@ -390,8 +390,10 @@ export function normalizeV2Draft(
     customerAddress: draft.header.customerAddress?.trim(),
     invoiceNo: draft.header.invoiceNo.trim(),
     date: draft.header.date.trim() || pendingHeader.date,
+    subtotalAmount,
     totalAmount,
     taxAmount: normalizeMoneyValue(draft.header.taxAmount),
+    currency: draft.header.currency.trim() || undefined,
     notes: draft.header.notes.trim(),
   }
 
