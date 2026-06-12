@@ -213,6 +213,43 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     throw new Error('已完成的发票任务不能从最近任务中删除。')
   }
 
+  const [{ referenceCount: preDeleteReferenceCount } = { referenceCount: 0 }] =
+    await allD1<{
+      referenceCount: number
+    }>(
+      db,
+      `/* invoice:delete-source-reference-count */
+      SELECT COUNT(*) AS referenceCount
+      FROM intake_jobs
+      WHERE source_document_id = ?
+        AND id != ?`,
+      [row.sourceDocumentId, row.jobId],
+    )
+  const isAlreadyLastSourceJob = Number(preDeleteReferenceCount) === 0
+
+  if (row.r2Key && isAlreadyLastSourceJob) {
+    const documentsBucket = rawDocumentsBucket
+
+    if (!documentsBucket) {
+      throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
+    }
+
+    try {
+      await documentsBucket.delete(row.r2Key)
+    } catch (error) {
+      await db
+        .prepare(
+          `/* invoice:delete-intake-restore */
+          UPDATE intake_jobs
+          SET stage = ?
+          WHERE id = ? AND stage = 'deleting'`,
+        )
+        .bind(row.stage, row.jobId)
+        .run()
+      throw error
+    }
+  }
+
   await db
     .prepare(
       `/* invoice:delete-extractions */
@@ -226,35 +263,58 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     .prepare(
       `/* invoice:delete-intake-job */
       DELETE FROM intake_jobs
-      WHERE id = ? AND stage = 'deleting'`,
+      WHERE id = ? AND stage IN ('deleting', ?)`,
     )
-    .bind(row.jobId)
+    .bind(row.jobId, row.stage)
     .run()
 
   if ((intakeDeleteResult.meta?.changes ?? 0) !== 1) {
     throw new Error('发票任务删除状态已变化，不能完成删除。')
   }
 
-  const [{ referenceCount } = { referenceCount: 0 }] = await allD1<{
-    referenceCount: number
-  }>(
-    db,
-    `/* invoice:delete-source-reference-count */
-    SELECT COUNT(*) AS referenceCount
-    FROM intake_jobs
-    WHERE source_document_id = ?`,
-    [row.sourceDocumentId],
-  )
-  const isLastSourceJob = Number(referenceCount) === 0
+  const isLastSourceJob = isAlreadyLastSourceJob
+    ? true
+    : Number(
+        (
+          await allD1<{ referenceCount: number }>(
+            db,
+            `/* invoice:delete-source-reference-count */
+            SELECT COUNT(*) AS referenceCount
+            FROM intake_jobs
+            WHERE source_document_id = ?`,
+            [row.sourceDocumentId],
+          )
+        )[0]?.referenceCount ?? 0,
+      ) === 0
 
-  if (row.r2Key && isLastSourceJob) {
+  if (row.r2Key && isLastSourceJob && !isAlreadyLastSourceJob) {
     const documentsBucket = rawDocumentsBucket
 
     if (!documentsBucket) {
       throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
     }
 
-    await documentsBucket.delete(row.r2Key)
+    try {
+      await documentsBucket.delete(row.r2Key)
+    } catch (error) {
+      const now = new Date().toISOString()
+      await db
+        .prepare(
+          `/* invoice:delete-intake-recreate-cleanup-job */
+          INSERT INTO intake_jobs (
+            id,
+            source_document_id,
+            stage,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO NOTHING`,
+        )
+        .bind(row.jobId, row.sourceDocumentId, row.stage, now, now)
+        .run()
+      throw error
+    }
   }
 
   if (isLastSourceJob) {
