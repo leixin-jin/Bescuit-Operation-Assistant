@@ -250,6 +250,20 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     }
   }
 
+  const verifyClaimResult = await db
+    .prepare(
+      `/* invoice:delete-intake-verify-claim */
+      UPDATE intake_jobs
+      SET stage = 'deleting'
+      WHERE id = ? AND stage = 'deleting'`,
+    )
+    .bind(row.jobId)
+    .run()
+
+  if ((verifyClaimResult.meta?.changes ?? 0) !== 1) {
+    throw new Error('发票任务删除状态已变化，不能完成删除。')
+  }
+
   await db
     .prepare(
       `/* invoice:delete-extractions */
@@ -263,9 +277,9 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     .prepare(
       `/* invoice:delete-intake-job */
       DELETE FROM intake_jobs
-      WHERE id = ? AND stage IN ('deleting', ?)`,
+      WHERE id = ? AND stage = 'deleting'`,
     )
-    .bind(row.jobId, row.stage)
+    .bind(row.jobId)
     .run()
 
   if ((intakeDeleteResult.meta?.changes ?? 0) !== 1) {
@@ -311,7 +325,7 @@ export async function deleteInvoiceIntakeJobFromDatabase(
           VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(id) DO NOTHING`,
         )
-        .bind(row.jobId, row.sourceDocumentId, row.stage, now, now)
+        .bind(row.jobId, row.sourceDocumentId, 'deleting', now, now)
         .run()
       throw error
     }

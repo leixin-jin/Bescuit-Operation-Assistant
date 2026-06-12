@@ -2073,12 +2073,13 @@ describe('invoice review D1 integration', () => {
         },
       },
     )
-    env.RAW_DOCUMENTS = createFakeR2Bucket({
+    const r2 = createFakeR2Bucket({
       [r2Key]: {
         body: '%PDF-concurrent-delete',
         contentType: 'application/pdf',
       },
     })
+    env.RAW_DOCUMENTS = r2
 
     await expect(
       deleteInvoiceIntakeJobFromDatabase(env, 'job-concurrent-delete'),
@@ -2091,6 +2092,7 @@ describe('invoice review D1 integration', () => {
     expect(tables.extraction_results).toHaveLength(0)
     expect(tables.source_documents).toHaveLength(0)
     await expect(env.RAW_DOCUMENTS.get(r2Key)).resolves.toBeNull()
+    expect(r2.deleteCallCount(r2Key)).toBe(1)
   })
 
   test('deleting a ready intake job is rejected before D1 or R2 is mutated', async () => {
@@ -2178,13 +2180,14 @@ describe('invoice review D1 integration', () => {
     ).resolves.not.toBeNull()
   })
 
-  test('delete cleanup completes if the claimed job returns to its original stage after R2 delete', async () => {
+  test('delete cleanup rejects if the claimed job returns to its original stage after R2 delete', async () => {
+    const r2Key = 'raw-documents/2026/04/src-lost-claim-invoice.pdf'
     const { env, tables } = createFakeD1Env(
       {
         source_documents: [
           createSourceDocumentRow({
             id: 'src-lost-claim',
-            r2_key: 'raw-documents/2026/04/src-lost-claim-invoice.pdf',
+            r2_key: r2Key,
           }),
         ],
         intake_jobs: [
@@ -2215,7 +2218,7 @@ describe('invoice review D1 integration', () => {
       },
     )
     env.RAW_DOCUMENTS = createFakeR2Bucket({
-      'raw-documents/2026/04/src-lost-claim-invoice.pdf': {
+      [r2Key]: {
         body: '%PDF-lost-claim',
         contentType: 'application/pdf',
       },
@@ -2223,17 +2226,76 @@ describe('invoice review D1 integration', () => {
 
     await expect(
       deleteInvoiceIntakeJobFromDatabase(env, 'job-lost-claim'),
-    ).resolves.toEqual({
-      ok: true,
-      deleted: true,
+    ).rejects.toThrow(/删除状态已变化/)
+
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-lost-claim',
+      stage: 'needs_review',
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    // The last-source path deletes R2 before final D1 cleanup; if the claim is
+    // lost after that point, D1 is preserved but the object may already be gone.
+    expect(tables.extraction_results).toHaveLength(0)
+    await expect(env.RAW_DOCUMENTS.get(r2Key)).resolves.toBeNull()
+  })
+
+  test('delete cleanup preserves D1 rows if the claim is lost immediately after R2 delete', async () => {
+    const r2Key = 'raw-documents/2026/04/src-lost-claim-before-db-invoice.pdf'
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [
+          createSourceDocumentRow({
+            id: 'src-lost-claim-before-db',
+            r2_key: r2Key,
+          }),
+        ],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-lost-claim-before-db',
+            source_document_id: 'src-lost-claim-before-db',
+            stage: 'needs_review',
+          }),
+        ],
+        extraction_results: [
+          {
+            id: 'ext-lost-claim-before-db',
+            intake_job_id: 'job-lost-claim-before-db',
+            markdown_text: 'markdown',
+            structured_json: null,
+            raw_response: null,
+            schema_version: 'invoice-extraction-v1',
+            created_at: '2026-04-27T10:00:00.000Z',
+          },
+        ],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (sql.includes('invoice:delete-intake-verify-claim')) {
+            currentTables.intake_jobs[0].stage = 'needs_review'
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      [r2Key]: {
+        body: '%PDF-lost-claim-before-db',
+        contentType: 'application/pdf',
+      },
     })
 
-    expect(tables.intake_jobs).toHaveLength(0)
-    expect(tables.source_documents).toHaveLength(0)
-    expect(tables.extraction_results).toHaveLength(0)
     await expect(
-      env.RAW_DOCUMENTS.get('raw-documents/2026/04/src-lost-claim-invoice.pdf'),
-    ).resolves.toBeNull()
+      deleteInvoiceIntakeJobFromDatabase(env, 'job-lost-claim-before-db'),
+    ).rejects.toThrow(/删除状态已变化/)
+
+    expect(tables.intake_jobs).toHaveLength(1)
+    expect(tables.intake_jobs[0]).toMatchObject({
+      id: 'job-lost-claim-before-db',
+      stage: 'needs_review',
+    })
+    expect(tables.source_documents).toHaveLength(1)
+    expect(tables.extraction_results).toHaveLength(1)
+    await expect(env.RAW_DOCUMENTS.get(r2Key)).resolves.toBeNull()
   })
 
   test('deleting surfaces R2 deletion failures before last job deletion and preserves retryable rows', async () => {
@@ -2354,7 +2416,7 @@ describe('invoice review D1 integration', () => {
     expect(tables.intake_jobs[0]).toMatchObject({
       id: 'job-concurrent-r2-fail',
       source_document_id: 'src-concurrent-r2-fail',
-      stage: 'needs_review',
+      stage: 'deleting',
     })
     expect(tables.source_documents).toHaveLength(1)
     expect(tables.extraction_results).toHaveLength(0)
@@ -4017,13 +4079,25 @@ class FakeD1PreparedStatement {
       return 1
     }
 
+    if (sql.includes('invoice:delete-intake-verify-claim')) {
+      const [jobId] = this.params
+      const row = this.tables.intake_jobs.find(
+        (candidate) => candidate.id === jobId && candidate.stage === 'deleting',
+      )
+
+      if (!row) {
+        return 0
+      }
+
+      row.stage = 'deleting'
+      return 1
+    }
+
     if (sql.includes('invoice:delete-intake-job')) {
-      const [jobId, originalStage] = this.params
+      const [jobId] = this.params
       const beforeCount = this.tables.intake_jobs.length
       this.tables.intake_jobs = this.tables.intake_jobs.filter(
-        (row) =>
-          row.id !== jobId ||
-          (row.stage !== 'deleting' && row.stage !== originalStage),
+        (row) => row.id !== jobId || row.stage !== 'deleting',
       )
       return beforeCount - this.tables.intake_jobs.length
     }
@@ -4556,8 +4630,11 @@ function createFakeR2Bucket(
   options: { failDelete?: boolean } = {},
 ) {
   const objectMap = new Map(Object.entries(objects))
+  const deleteCalls = new Map<string, number>()
 
   return {
+    deleteCalls,
+    deleteCallCount: (key: string) => deleteCalls.get(key) ?? 0,
     head: async (key: string) => {
       const object = objectMap.get(key)
 
@@ -4588,6 +4665,8 @@ function createFakeR2Bucket(
       }
     },
     delete: async (key: string) => {
+      deleteCalls.set(key, (deleteCalls.get(key) ?? 0) + 1)
+
       if (options.failDelete) {
         throw new Error(`R2 delete failed: ${key}`)
       }
@@ -4605,7 +4684,10 @@ function createFakeR2Bucket(
           options?.httpMetadata?.contentType || value.type || 'application/octet-stream',
       })
     },
-  } as unknown as R2Bucket
+  } as R2Bucket & {
+    deleteCalls: Map<string, number>
+    deleteCallCount: (key: string) => number
+  }
 }
 
 interface FakeQueue {
