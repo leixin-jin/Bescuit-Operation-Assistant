@@ -213,42 +213,6 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     throw new Error('已完成的发票任务不能从最近任务中删除。')
   }
 
-  const [{ referenceCount } = { referenceCount: 0 }] = await allD1<{
-    referenceCount: number
-  }>(
-    db,
-    `/* invoice:delete-source-reference-count */
-    SELECT COUNT(*) AS referenceCount
-    FROM intake_jobs
-    WHERE source_document_id = ?
-      AND id != ?`,
-    [row.sourceDocumentId, row.jobId],
-  )
-  const isLastSourceJob = Number(referenceCount) === 0
-
-  if (row.r2Key && isLastSourceJob) {
-    const documentsBucket = rawDocumentsBucket
-
-    if (!documentsBucket) {
-      throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
-    }
-
-    try {
-      await documentsBucket.delete(row.r2Key)
-    } catch (error) {
-      await db
-        .prepare(
-          `/* invoice:delete-intake-restore */
-          UPDATE intake_jobs
-          SET stage = ?
-          WHERE id = ? AND stage = 'deleting'`,
-        )
-        .bind(row.stage, row.jobId)
-        .run()
-      throw error
-    }
-  }
-
   await db
     .prepare(
       `/* invoice:delete-extractions */
@@ -269,6 +233,28 @@ export async function deleteInvoiceIntakeJobFromDatabase(
 
   if ((intakeDeleteResult.meta?.changes ?? 0) !== 1) {
     throw new Error('发票任务删除状态已变化，不能完成删除。')
+  }
+
+  const [{ referenceCount } = { referenceCount: 0 }] = await allD1<{
+    referenceCount: number
+  }>(
+    db,
+    `/* invoice:delete-source-reference-count */
+    SELECT COUNT(*) AS referenceCount
+    FROM intake_jobs
+    WHERE source_document_id = ?`,
+    [row.sourceDocumentId],
+  )
+  const isLastSourceJob = Number(referenceCount) === 0
+
+  if (row.r2Key && isLastSourceJob) {
+    const documentsBucket = rawDocumentsBucket
+
+    if (!documentsBucket) {
+      throw new Error('Missing Cloudflare binding: RAW_DOCUMENTS')
+    }
+
+    await documentsBucket.delete(row.r2Key)
   }
 
   if (isLastSourceJob) {
@@ -648,8 +634,8 @@ async function listRecheckSiblingRows(
     SELECT id AS jobId, stage
     FROM intake_jobs
     WHERE source_document_id = ?
-      AND id LIKE ?`,
-    [input.sourceDocumentId, `${input.originalJobId}_p%`],
+      AND id LIKE ? ESCAPE '\\'`,
+    [input.sourceDocumentId, `${escapeSqlLike(input.originalJobId)}\\_p%`],
   )
 }
 
@@ -657,36 +643,58 @@ async function deleteConfirmedInvoiceAccountingRowsForJobs(
   db: D1Database,
   jobIds: string[],
 ) {
-  for (const jobId of jobIds) {
-    await deleteConfirmedInvoiceAccountingRows(db, jobId)
+  if (jobIds.length === 0) {
+    return
   }
+
+  const placeholders = jobIds.map(() => '?').join(', ')
+  const invoiceRows = await allD1<InvoiceIdRow>(
+    db,
+    `/* invoice:recheck-list-accounting-invoices */
+    SELECT id
+    FROM invoices
+    WHERE intake_job_id IN (${placeholders})`,
+    jobIds,
+  )
+  const invoiceIds = Array.from(
+    new Set([...invoiceRows.map((row) => row.id), ...jobIds.map(getInvoiceId)]),
+  )
+
+  if (invoiceIds.length === 0) {
+    return
+  }
+
+  await deleteConfirmedInvoiceAccountingRows(db, invoiceIds)
 }
 
-async function deleteConfirmedInvoiceAccountingRows(db: D1Database, jobId: string) {
-  const invoiceId = getInvoiceId(jobId)
-  const ledgerEntryId = getLedgerEntryId(invoiceId)
+async function deleteConfirmedInvoiceAccountingRows(
+  db: D1Database,
+  invoiceIds: string[],
+) {
+  const placeholders = invoiceIds.map(() => '?').join(', ')
   const statements = [
     db
       .prepare(
         `/* invoice:recheck-delete-ledger */
         DELETE FROM ledger_entries
-        WHERE id = ?`,
+        WHERE source_kind = 'invoice'
+          AND source_id IN (${placeholders})`,
       )
-      .bind(ledgerEntryId),
+      .bind(...invoiceIds),
     db
       .prepare(
         `/* invoice:recheck-delete-items */
         DELETE FROM invoice_items
-        WHERE invoice_id = ?`,
+        WHERE invoice_id IN (${placeholders})`,
       )
-      .bind(invoiceId),
+      .bind(...invoiceIds),
     db
       .prepare(
         `/* invoice:recheck-delete-invoice */
         DELETE FROM invoices
-        WHERE id = ?`,
+        WHERE id IN (${placeholders})`,
       )
-      .bind(invoiceId),
+      .bind(...invoiceIds),
   ]
 
   if (typeof db.batch === 'function') {
@@ -697,6 +705,10 @@ async function deleteConfirmedInvoiceAccountingRows(db: D1Database, jobId: strin
   for (const statement of statements) {
     await statement.run()
   }
+}
+
+function escapeSqlLike(value: string) {
+  return value.replace(/[\\%_]/g, (character) => `\\${character}`)
 }
 
 async function retireStaleNonReadyRecheckSiblings(

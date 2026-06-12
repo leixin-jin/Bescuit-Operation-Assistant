@@ -166,7 +166,72 @@ describe('multi-invoice sibling persistence', () => {
     ).toBe('OLD-P2')
   })
 
-  test('recheck overwrites affected ready sibling after clearing its accounting rows', async () => {
+  test('queue sibling insert does not create an extraction row for a ready sibling missing extraction results', async () => {
+    const r2Key = 'raw-documents/2026/05/ready-sibling-missing-ext.pdf'
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-ready-sibling-missing-ext',
+          r2_key: r2Key,
+          original_filename: 'ready-sibling-missing-ext.pdf',
+          status: 'uploaded',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-ready-sibling-missing-ext',
+          source_document_id: 'src-ready-sibling-missing-ext',
+          stage: 'queued',
+        }),
+        createIntakeJobRow({
+          id: 'job-ready-sibling-missing-ext_p2',
+          source_document_id: 'src-ready-sibling-missing-ext',
+          stage: 'ready',
+          confidence_score: 0.99,
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      [r2Key]: {
+        body: '%PDF-ready-sibling-missing-ext',
+        contentType: 'application/pdf',
+      },
+    })
+    providerExtractMock.mockResolvedValueOnce({
+      draft: createProviderDraft('PRIMARY', '10.00'),
+      rawResponse: 'primary',
+      additionalDrafts: [
+        {
+          pageNumber: 2,
+          draft: createProviderDraft('NEW-P2', '22.00'),
+          rawResponse: 'new sibling p2',
+        },
+      ],
+    })
+
+    await processInvoiceIntakeQueueMessage(env, {
+      jobId: 'job-ready-sibling-missing-ext',
+      sourceDocumentId: 'src-ready-sibling-missing-ext',
+      r2Key,
+      fileName: 'ready-sibling-missing-ext.pdf',
+      mimeType: 'application/pdf',
+      uploadedAt: '2026-05-27T10:00:00.000Z',
+    })
+
+    expect(
+      tables.intake_jobs.find((row) => row.id === 'job-ready-sibling-missing-ext_p2'),
+    ).toMatchObject({
+      stage: 'ready',
+      confidence_score: 0.99,
+    })
+    expect(
+      tables.extraction_results.some(
+        (row) => row.intake_job_id === 'job-ready-sibling-missing-ext_p2',
+      ),
+    ).toBe(false)
+  })
+
+  test('recheck overwrites affected ready sibling after clearing accounting rows for persisted invoice ids', async () => {
     const r2Key = 'raw-documents/2026/05/recheck-ready-sibling.pdf'
     const { env, tables } = createFakeD1Env({
       source_documents: [
@@ -202,22 +267,22 @@ describe('multi-invoice sibling persistence', () => {
       ],
       invoices: [
         createInvoiceRow({
-          id: 'inv_job-recheck-ready-sibling_p2',
+          id: 'inv-shared-dedupe',
           intake_job_id: 'job-recheck-ready-sibling_p2',
           source_document_id: 'src-recheck-ready-sibling',
         }),
       ],
       invoice_items: [
         createInvoiceItemRow({
-          id: 'inv_job-recheck-ready-sibling_p2_item_1',
-          invoice_id: 'inv_job-recheck-ready-sibling_p2',
+          id: 'inv-shared-dedupe_item_1',
+          invoice_id: 'inv-shared-dedupe',
         }),
       ],
       ledger_entries: [
         createLedgerRow({
-          id: 'ledger_inv_job-recheck-ready-sibling_p2',
+          id: 'ledger_inv-shared-dedupe',
           source_kind: 'invoice',
-          source_id: 'inv_job-recheck-ready-sibling_p2',
+          source_id: 'inv-shared-dedupe',
         }),
       ],
     })
@@ -483,7 +548,7 @@ class FakeD1PreparedStatement {
 
     if (sql.includes('invoice:recheck-list-siblings')) {
       const [sourceDocumentId, jobIdPattern] = this.params
-      const jobIdPrefix = String(jobIdPattern).replace(/%$/, '')
+      const jobIdPrefix = unescapeSqlLikePatternPrefix(String(jobIdPattern))
       return this.tables.intake_jobs
         .filter(
           (row) =>
@@ -494,6 +559,13 @@ class FakeD1PreparedStatement {
           jobId: row.id,
           stage: row.stage,
         }))
+    }
+
+    if (sql.includes('invoice:recheck-list-accounting-invoices')) {
+      const jobIds = new Set(this.params.map(String))
+      return this.tables.invoices
+        .filter((row) => row.intake_job_id !== null && jobIds.has(row.intake_job_id))
+        .map((row) => ({ id: row.id }))
     }
 
     throw new Error(`Unhandled fake D1 select: ${sql}`)
@@ -585,9 +657,14 @@ class FakeD1PreparedStatement {
         schemaVersion,
         createdAt,
       ] = this.params
+      const existingRow = this.tables.extraction_results.find((row) => row.id === id)
       const job = this.tables.intake_jobs.find((row) => row.id === intakeJobId)
 
-      if (job?.stage === 'ready' && !sql.includes('allow-ready-overwrite')) {
+      if (
+        job?.stage === 'ready' &&
+        !sql.includes('allow-ready-overwrite') &&
+        (existingRow || sql.includes('NOT EXISTS'))
+      ) {
         return 0
       }
 
@@ -698,27 +775,29 @@ class FakeD1PreparedStatement {
     }
 
     if (sql.includes('invoice:recheck-delete-ledger')) {
-      const [ledgerEntryId] = this.params
+      const invoiceIds = new Set(this.params.map(String))
       const beforeCount = this.tables.ledger_entries.length
       this.tables.ledger_entries = this.tables.ledger_entries.filter(
-        (row) => row.id !== ledgerEntryId,
+        (row) => row.source_kind !== 'invoice' || !invoiceIds.has(row.source_id),
       )
       return beforeCount - this.tables.ledger_entries.length
     }
 
     if (sql.includes('invoice:recheck-delete-items')) {
-      const [invoiceId] = this.params
+      const invoiceIds = new Set(this.params.map(String))
       const beforeCount = this.tables.invoice_items.length
       this.tables.invoice_items = this.tables.invoice_items.filter(
-        (row) => row.invoice_id !== invoiceId,
+        (row) => !invoiceIds.has(row.invoice_id),
       )
       return beforeCount - this.tables.invoice_items.length
     }
 
     if (sql.includes('invoice:recheck-delete-invoice')) {
-      const [invoiceId] = this.params
+      const invoiceIds = new Set(this.params.map(String))
       const beforeCount = this.tables.invoices.length
-      this.tables.invoices = this.tables.invoices.filter((row) => row.id !== invoiceId)
+      this.tables.invoices = this.tables.invoices.filter(
+        (row) => !invoiceIds.has(row.id),
+      )
       return beforeCount - this.tables.invoices.length
     }
 
@@ -780,6 +859,12 @@ function upsertExtraction(tables: FakeTables, nextRow: ExtractionResultRow) {
 
 function nullableString(value: unknown) {
   return value === null ? null : String(value)
+}
+
+function unescapeSqlLikePatternPrefix(pattern: string) {
+  return pattern
+    .replace(/%$/, '')
+    .replace(/\\([\\%_])/g, '$1')
 }
 
 function getExtractionInvoiceNumbers(tables: FakeTables) {

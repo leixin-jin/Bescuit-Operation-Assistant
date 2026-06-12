@@ -271,6 +271,14 @@ export async function persistAdditionalInvoiceExtractionDrafts(input: {
   const readyOverwriteClause = input.allowReadyOverwrite
     ? '1 = 1 /* allow-ready-overwrite */'
     : "intake_jobs.stage != 'ready'"
+  const extractionInsertGuardClause = input.allowReadyOverwrite
+    ? '1 = 1 /* allow-ready-overwrite */'
+    : `NOT EXISTS (
+            SELECT 1
+            FROM intake_jobs
+            WHERE intake_jobs.id = ?
+              AND intake_jobs.stage = 'ready'
+          )`
   const extractionReadyOverwriteClause = input.allowReadyOverwrite
     ? '1 = 1 /* allow-ready-overwrite */'
     : `EXISTS (
@@ -332,7 +340,8 @@ export async function persistAdditionalInvoiceExtractionDrafts(input: {
           schema_version,
           created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        SELECT ?, ?, ?, ?, ?, ?, ?
+        WHERE ${extractionInsertGuardClause}
         ON CONFLICT(id) DO UPDATE SET
           markdown_text = excluded.markdown_text,
           structured_json = excluded.structured_json,
@@ -342,13 +351,16 @@ export async function persistAdditionalInvoiceExtractionDrafts(input: {
         WHERE ${extractionReadyOverwriteClause}`,
       )
       .bind(
-        getExtractionResultId(siblingJobId),
-        siblingJobId,
-        draft.markdownText,
-        serializeExtractionDraft(draft),
-        additional.rawResponse,
-        schemaVersion,
-        input.createdAt,
+        ...[
+          getExtractionResultId(siblingJobId),
+          siblingJobId,
+          draft.markdownText,
+          serializeExtractionDraft(draft),
+          additional.rawResponse,
+          schemaVersion,
+          input.createdAt,
+          ...(input.allowReadyOverwrite ? [] : [siblingJobId]),
+        ],
       )
       .run()
   }

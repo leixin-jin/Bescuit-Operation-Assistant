@@ -2026,6 +2026,73 @@ describe('invoice review D1 integration', () => {
     await expect(env.RAW_DOCUMENTS.get(r2Key)).resolves.toBeNull()
   })
 
+  test('deleting the last remaining sibling after a concurrent delete cleans up shared source and R2', async () => {
+    const r2Key = 'raw-documents/2026/04/src-concurrent-delete.pdf'
+    const { env, tables } = createFakeD1Env(
+      {
+        source_documents: [
+          createSourceDocumentRow({
+            id: 'src-concurrent-delete',
+            r2_key: r2Key,
+            original_filename: 'concurrent-delete.pdf',
+          }),
+        ],
+        intake_jobs: [
+          createIntakeJobRow({
+            id: 'job-concurrent-delete',
+            source_document_id: 'src-concurrent-delete',
+            stage: 'needs_review',
+          }),
+          createIntakeJobRow({
+            id: 'job-concurrent-delete_p2',
+            source_document_id: 'src-concurrent-delete',
+            stage: 'needs_review',
+          }),
+        ],
+        extraction_results: [
+          createExtractionResultRow({
+            id: 'ext_job-concurrent-delete',
+            intake_job_id: 'job-concurrent-delete',
+          }),
+          createExtractionResultRow({
+            id: 'ext_job-concurrent-delete_p2',
+            intake_job_id: 'job-concurrent-delete_p2',
+          }),
+        ],
+      },
+      {
+        beforeMutation: ({ sql, tables: currentTables }) => {
+          if (sql.includes('invoice:delete-extractions')) {
+            currentTables.intake_jobs = currentTables.intake_jobs.filter(
+              (row) => row.id !== 'job-concurrent-delete_p2',
+            )
+            currentTables.extraction_results = currentTables.extraction_results.filter(
+              (row) => row.intake_job_id !== 'job-concurrent-delete_p2',
+            )
+          }
+        },
+      },
+    )
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      [r2Key]: {
+        body: '%PDF-concurrent-delete',
+        contentType: 'application/pdf',
+      },
+    })
+
+    await expect(
+      deleteInvoiceIntakeJobFromDatabase(env, 'job-concurrent-delete'),
+    ).resolves.toEqual({
+      ok: true,
+      deleted: true,
+    })
+
+    expect(tables.intake_jobs).toHaveLength(0)
+    expect(tables.extraction_results).toHaveLength(0)
+    expect(tables.source_documents).toHaveLength(0)
+    await expect(env.RAW_DOCUMENTS.get(r2Key)).resolves.toBeNull()
+  })
+
   test('deleting a ready intake job is rejected before D1 or R2 is mutated', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [createSourceDocumentRow({ id: 'src-ready' })],
@@ -2111,7 +2178,7 @@ describe('invoice review D1 integration', () => {
     ).resolves.not.toBeNull()
   })
 
-  test('delete cleanup rejects and preserves source document if deleting claim is lost after R2 deletion', async () => {
+  test('delete cleanup rejects and preserves source document and R2 if deleting claim is lost', async () => {
     const { env, tables } = createFakeD1Env(
       {
         source_documents: [
@@ -2164,10 +2231,10 @@ describe('invoice review D1 integration', () => {
     expect(tables.extraction_results).toHaveLength(0)
     await expect(
       env.RAW_DOCUMENTS.get('raw-documents/2026/04/src-lost-claim-invoice.pdf'),
-    ).resolves.toBeNull()
+    ).resolves.not.toBeNull()
   })
 
-  test('deleting restores the previous stage if R2 deletion fails after claim', async () => {
+  test('deleting surfaces R2 deletion failures after job deletion and preserves source document', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [
         createSourceDocumentRow({
@@ -2204,10 +2271,9 @@ describe('invoice review D1 integration', () => {
       'r2 unavailable',
     )
 
-    expect(tables.intake_jobs).toHaveLength(1)
-    expect(tables.intake_jobs[0].stage).toBe('needs_review')
+    expect(tables.intake_jobs).toHaveLength(0)
     expect(tables.source_documents).toHaveLength(1)
-    expect(tables.extraction_results).toHaveLength(1)
+    expect(tables.extraction_results).toHaveLength(0)
   })
 
   test('queue processing treats a deleted intake job as an idempotent no-op', async () => {
@@ -3010,7 +3076,8 @@ class FakeD1PreparedStatement {
         {
           referenceCount: this.tables.intake_jobs.filter(
             (row) =>
-              row.source_document_id === sourceDocumentId && row.id !== jobId,
+              row.source_document_id === sourceDocumentId &&
+              (jobId === undefined || row.id !== jobId),
           ).length,
         },
       ]
@@ -3040,7 +3107,7 @@ class FakeD1PreparedStatement {
 
     if (sql.includes('invoice:recheck-list-siblings')) {
       const [sourceDocumentId, jobIdPattern] = this.params
-      const jobIdPrefix = String(jobIdPattern).replace(/%$/, '')
+      const jobIdPrefix = unescapeSqlLikePatternPrefix(String(jobIdPattern))
 
       return this.tables.intake_jobs
         .filter(
@@ -3052,6 +3119,13 @@ class FakeD1PreparedStatement {
           jobId: row.id,
           stage: row.stage,
         }))
+    }
+
+    if (sql.includes('invoice:recheck-list-accounting-invoices')) {
+      const jobIds = new Set(this.params.map(String))
+      return this.tables.invoices
+        .filter((row) => row.intake_job_id !== null && jobIds.has(row.intake_job_id))
+        .map((row) => ({ id: row.id }))
     }
 
     if (sql.includes('invoice:latest-extraction')) {
@@ -3540,6 +3614,14 @@ class FakeD1PreparedStatement {
           intake_job_id: existingRow.intake_job_id,
         })
       } else {
+        if (
+          job?.stage === 'ready' &&
+          !sql.includes('allow-ready-overwrite') &&
+          sql.includes('NOT EXISTS')
+        ) {
+          return 0
+        }
+
         this.tables.extraction_results.push(nextRow)
       }
       return 1
@@ -3744,27 +3826,29 @@ class FakeD1PreparedStatement {
     }
 
     if (sql.includes('invoice:recheck-delete-ledger')) {
-      const [ledgerEntryId] = this.params
+      const invoiceIds = new Set(this.params.map(String))
       const beforeCount = this.tables.ledger_entries.length
       this.tables.ledger_entries = this.tables.ledger_entries.filter(
-        (row) => row.id !== ledgerEntryId,
+        (row) => row.source_kind !== 'invoice' || !invoiceIds.has(row.source_id),
       )
       return beforeCount - this.tables.ledger_entries.length
     }
 
     if (sql.includes('invoice:recheck-delete-items')) {
-      const [invoiceId] = this.params
+      const invoiceIds = new Set(this.params.map(String))
       const beforeCount = this.tables.invoice_items.length
       this.tables.invoice_items = this.tables.invoice_items.filter(
-        (row) => row.invoice_id !== invoiceId,
+        (row) => !invoiceIds.has(row.invoice_id),
       )
       return beforeCount - this.tables.invoice_items.length
     }
 
     if (sql.includes('invoice:recheck-delete-invoice')) {
-      const [invoiceId] = this.params
+      const invoiceIds = new Set(this.params.map(String))
       const beforeCount = this.tables.invoices.length
-      this.tables.invoices = this.tables.invoices.filter((row) => row.id !== invoiceId)
+      this.tables.invoices = this.tables.invoices.filter(
+        (row) => !invoiceIds.has(row.id),
+      )
       return beforeCount - this.tables.invoices.length
     }
 
@@ -4351,6 +4435,12 @@ function createReadyReviewJob(
       },
     ],
   }
+}
+
+function unescapeSqlLikePatternPrefix(pattern: string) {
+  return pattern
+    .replace(/%$/, '')
+    .replace(/\\([\\%_])/g, '$1')
 }
 
 function createFakeR2Bucket(
