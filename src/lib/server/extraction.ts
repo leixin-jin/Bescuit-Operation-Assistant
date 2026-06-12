@@ -265,8 +265,20 @@ export async function persistAdditionalInvoiceExtractionDrafts(input: {
   providerModel: string
   createdAt: string
   additionalDrafts: AdditionalInvoiceExtractionDraft[]
+  allowReadyOverwrite?: boolean
 }) {
   const db = '$client' in input.db ? input.db.$client : input.db
+  const readyOverwriteClause = input.allowReadyOverwrite
+    ? '1 = 1 /* allow-ready-overwrite */'
+    : "intake_jobs.stage != 'ready'"
+  const extractionReadyOverwriteClause = input.allowReadyOverwrite
+    ? '1 = 1 /* allow-ready-overwrite */'
+    : `EXISTS (
+            SELECT 1
+            FROM intake_jobs
+            WHERE intake_jobs.id = extraction_results.intake_job_id
+              AND intake_jobs.stage != 'ready'
+          )`
 
   for (const additional of input.additionalDrafts) {
     const siblingJobId = `${input.originalJobId}_p${additional.pageNumber}`
@@ -289,13 +301,13 @@ export async function persistAdditionalInvoiceExtractionDrafts(input: {
         )
         VALUES (?, ?, ?, ?, 'needs_review', ?, NULL, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-          source_document_id = excluded.source_document_id,
           extractor_provider = excluded.extractor_provider,
           extractor_model = excluded.extractor_model,
           stage = excluded.stage,
           confidence_score = excluded.confidence_score,
           error_message = excluded.error_message,
-          updated_at = excluded.updated_at`,
+          updated_at = excluded.updated_at
+        WHERE ${readyOverwriteClause}`,
       )
       .bind(
         siblingJobId,
@@ -322,12 +334,12 @@ export async function persistAdditionalInvoiceExtractionDrafts(input: {
         )
         VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-          intake_job_id = excluded.intake_job_id,
           markdown_text = excluded.markdown_text,
           structured_json = excluded.structured_json,
           raw_response = excluded.raw_response,
           schema_version = excluded.schema_version,
-          created_at = excluded.created_at`,
+          created_at = excluded.created_at
+        WHERE ${extractionReadyOverwriteClause}`,
       )
       .bind(
         getExtractionResultId(siblingJobId),

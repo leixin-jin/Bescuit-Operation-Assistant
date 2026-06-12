@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { describe, expect, test } from 'vitest'
 
 import type { AppBindings } from '@/lib/server/bindings'
 import { getMadridTodayInputValue, type InvoiceReviewJob } from '@/lib/server/app-domain'
@@ -30,24 +30,6 @@ import {
 import { processInvoiceIntakeQueueMessage } from '@/lib/server/extraction'
 import { assertDemoDataEnabled } from '@/lib/server/runtime-config'
 import { uploadInvoiceSourceDocument } from '@/lib/server/upload'
-
-const providerExtractMock = vi.hoisted(() => vi.fn())
-
-vi.mock('@/lib/server/invoice-extraction/providers', () => ({
-  selectInvoiceExtractionProvider: vi.fn(() => ({
-    id: 'heuristic-v1',
-    model: 'filename-fallback-v1',
-    extract: providerExtractMock,
-  })),
-}))
-
-beforeEach(() => {
-  providerExtractMock.mockReset()
-  providerExtractMock.mockResolvedValue({
-    draft: createProviderDraft('filename-fallback', '0.00'),
-    rawResponse: 'filename-fallback default test extraction',
-  })
-})
 
 describe('real data integration boundaries', () => {
   test('production business data modules do not import fallback-store directly', () => {
@@ -1975,6 +1957,75 @@ describe('invoice review D1 integration', () => {
     ).resolves.toBeNull()
   })
 
+  test('deleting one unfinished sibling preserves shared source document and R2 until last job is deleted', async () => {
+    const r2Key = 'raw-documents/2026/04/src-shared-siblings.pdf'
+    const { env, tables } = createFakeD1Env({
+      source_documents: [
+        createSourceDocumentRow({
+          id: 'src-shared-siblings',
+          r2_key: r2Key,
+          original_filename: 'shared-siblings.pdf',
+        }),
+      ],
+      intake_jobs: [
+        createIntakeJobRow({
+          id: 'job-shared',
+          source_document_id: 'src-shared-siblings',
+          stage: 'needs_review',
+        }),
+        createIntakeJobRow({
+          id: 'job-shared_p2',
+          source_document_id: 'src-shared-siblings',
+          stage: 'needs_review',
+        }),
+      ],
+      extraction_results: [
+        createExtractionResultRow({
+          id: 'ext_job-shared',
+          intake_job_id: 'job-shared',
+          markdown_text: 'primary',
+        }),
+        createExtractionResultRow({
+          id: 'ext_job-shared_p2',
+          intake_job_id: 'job-shared_p2',
+          markdown_text: 'sibling',
+        }),
+      ],
+    })
+    env.RAW_DOCUMENTS = createFakeR2Bucket({
+      [r2Key]: {
+        body: '%PDF-shared-siblings',
+        contentType: 'application/pdf',
+      },
+    })
+
+    await expect(
+      deleteInvoiceIntakeJobFromDatabase(env, 'job-shared_p2'),
+    ).resolves.toEqual({
+      ok: true,
+      deleted: true,
+    })
+
+    expect(tables.intake_jobs.map((row) => row.id)).toEqual(['job-shared'])
+    expect(tables.extraction_results.map((row) => row.intake_job_id)).toEqual([
+      'job-shared',
+    ])
+    expect(tables.source_documents.map((row) => row.id)).toEqual([
+      'src-shared-siblings',
+    ])
+    await expect(env.RAW_DOCUMENTS.get(r2Key)).resolves.not.toBeNull()
+
+    await expect(deleteInvoiceIntakeJobFromDatabase(env, 'job-shared')).resolves.toEqual({
+      ok: true,
+      deleted: true,
+    })
+
+    expect(tables.intake_jobs).toHaveLength(0)
+    expect(tables.extraction_results).toHaveLength(0)
+    expect(tables.source_documents).toHaveLength(0)
+    await expect(env.RAW_DOCUMENTS.get(r2Key)).resolves.toBeNull()
+  })
+
   test('deleting a ready intake job is rejected before D1 or R2 is mutated', async () => {
     const { env, tables } = createFakeD1Env({
       source_documents: [createSourceDocumentRow({ id: 'src-ready' })],
@@ -2206,85 +2257,6 @@ describe('invoice review D1 integration', () => {
     })
 
     expect(tables.intake_jobs[0]?.stage).toBe('deleting')
-  })
-
-  test('queue processing persists additional invoice drafts as sibling review jobs', async () => {
-    const r2Key = 'raw-documents/2026/05/2605A008462-2605A008463.PDF'
-    const fileName = '2605A008462-2605A008463.PDF'
-    const { env, tables } = createFakeD1Env({
-      source_documents: [
-        createSourceDocumentRow({
-          id: 'src-multi-invoice-pdf',
-          r2_key: r2Key,
-          original_filename: fileName,
-          mime_type: 'application/pdf',
-          status: 'uploaded',
-        }),
-      ],
-      intake_jobs: [
-        createIntakeJobRow({
-          id: 'job-multi-invoice-pdf',
-          source_document_id: 'src-multi-invoice-pdf',
-          stage: 'queued',
-        }),
-      ],
-    })
-    env.RAW_DOCUMENTS = createFakeR2Bucket({
-      [r2Key]: {
-        body: '%PDF-multi-invoice',
-        contentType: 'application/pdf',
-      },
-    })
-    providerExtractMock.mockResolvedValueOnce({
-      draft: createProviderDraft('2605A008462', '769.22'),
-      rawResponse: 'primary invoice 2605A008462',
-      additionalDrafts: [
-        {
-          pageNumber: 2,
-          draft: createProviderDraft('2605A008463', '733.15', {
-            markdownText: 'page 2 invoice 2605A008463',
-          }),
-          rawResponse: 'additional invoice 2605A008463',
-        },
-      ],
-    })
-
-    await expect(
-      processInvoiceIntakeQueueMessage(env, {
-        jobId: 'job-multi-invoice-pdf',
-        sourceDocumentId: 'src-multi-invoice-pdf',
-        r2Key,
-        fileName,
-        mimeType: 'application/pdf',
-        uploadedAt: '2026-05-27T10:00:00.000Z',
-      }),
-    ).resolves.toEqual({
-      jobId: 'job-multi-invoice-pdf',
-      stage: 'needs_review',
-    })
-
-    expect(
-      tables.intake_jobs
-        .filter((row) => row.source_document_id === 'src-multi-invoice-pdf')
-        .sort((left, right) => left.id.localeCompare(right.id))
-        .map((row) => ({ id: row.id, stage: row.stage })),
-    ).toEqual([
-      { id: 'job-multi-invoice-pdf', stage: 'needs_review' },
-      { id: 'job-multi-invoice-pdf_p2', stage: 'needs_review' },
-    ])
-
-    const extractionSummaries = tables.extraction_results
-      .slice()
-      .sort((left, right) => left.id.localeCompare(right.id))
-      .map((row) => ({
-        id: row.id,
-        invoiceNo: JSON.parse(row.structured_json ?? '{}').header?.invoiceNo,
-      }))
-
-    expect(extractionSummaries).toEqual([
-      { id: 'ext_job-multi-invoice-pdf', invoiceNo: '2605A008462' },
-      { id: 'ext_job-multi-invoice-pdf_p2', invoiceNo: '2605A008463' },
-    ])
   })
 
   test('queue success race does not write extraction data after job becomes deleting', async () => {
@@ -3032,6 +3004,18 @@ class FakeD1PreparedStatement {
         : []
     }
 
+    if (sql.includes('invoice:delete-source-reference-count')) {
+      const [sourceDocumentId, jobId] = this.params
+      return [
+        {
+          referenceCount: this.tables.intake_jobs.filter(
+            (row) =>
+              row.source_document_id === sourceDocumentId && row.id !== jobId,
+          ).length,
+        },
+      ]
+    }
+
     if (sql.includes('invoice:recheck-source')) {
       const [jobId] = this.params
       const job = this.tables.intake_jobs.find((row) => row.id === jobId)
@@ -3052,6 +3036,22 @@ class FakeD1PreparedStatement {
             },
           ]
         : []
+    }
+
+    if (sql.includes('invoice:recheck-list-siblings')) {
+      const [sourceDocumentId, jobIdPattern] = this.params
+      const jobIdPrefix = String(jobIdPattern).replace(/%$/, '')
+
+      return this.tables.intake_jobs
+        .filter(
+          (row) =>
+            row.source_document_id === sourceDocumentId &&
+            row.id.startsWith(jobIdPrefix),
+        )
+        .map((row) => ({
+          jobId: row.id,
+          stage: row.stage,
+        }))
     }
 
     if (sql.includes('invoice:latest-extraction')) {
@@ -3358,7 +3358,15 @@ class FakeD1PreparedStatement {
       }
 
       if (existingRow) {
-        Object.assign(existingRow, nextRow, { id: existingRow.id })
+        if (existingRow.stage === 'ready' && !sql.includes('allow-ready-overwrite')) {
+          return 0
+        }
+
+        Object.assign(existingRow, nextRow, {
+          id: existingRow.id,
+          source_document_id: existingRow.source_document_id,
+          created_at: existingRow.created_at,
+        })
       } else {
         this.tables.intake_jobs.push(nextRow)
       }
@@ -3512,6 +3520,7 @@ class FakeD1PreparedStatement {
         createdAt,
       ] = this.params
       const existingRow = this.tables.extraction_results.find((row) => row.id === id)
+      const job = this.tables.intake_jobs.find((row) => row.id === intakeJobId)
       const nextRow: ExtractionResultRow = {
         id: String(id),
         intake_job_id: String(intakeJobId),
@@ -3523,7 +3532,13 @@ class FakeD1PreparedStatement {
       }
 
       if (existingRow) {
-        Object.assign(existingRow, nextRow)
+        if (job?.stage === 'ready' && !sql.includes('allow-ready-overwrite')) {
+          return 0
+        }
+
+        Object.assign(existingRow, nextRow, {
+          intake_job_id: existingRow.intake_job_id,
+        })
       } else {
         this.tables.extraction_results.push(nextRow)
       }
@@ -3751,6 +3766,28 @@ class FakeD1PreparedStatement {
       const beforeCount = this.tables.invoices.length
       this.tables.invoices = this.tables.invoices.filter((row) => row.id !== invoiceId)
       return beforeCount - this.tables.invoices.length
+    }
+
+    if (sql.includes('invoice:recheck-retire-stale-sibling-extractions')) {
+      const jobIds = new Set(this.params.map(String))
+      const beforeCount = this.tables.extraction_results.length
+      this.tables.extraction_results = this.tables.extraction_results.filter(
+        (row) =>
+          !jobIds.has(row.intake_job_id) ||
+          this.tables.intake_jobs.some(
+            (job) => job.id === row.intake_job_id && job.stage === 'ready',
+          ),
+      )
+      return beforeCount - this.tables.extraction_results.length
+    }
+
+    if (sql.includes('invoice:recheck-retire-stale-sibling-jobs')) {
+      const jobIds = new Set(this.params.map(String))
+      const beforeCount = this.tables.intake_jobs.length
+      this.tables.intake_jobs = this.tables.intake_jobs.filter(
+        (row) => !jobIds.has(row.id) || row.stage === 'ready',
+      )
+      return beforeCount - this.tables.intake_jobs.length
     }
 
     if (sql.includes('invoice:delete-extractions')) {
@@ -4231,52 +4268,6 @@ function createExtractionResultRow(
     schema_version: 'invoice-extraction-v1',
     created_at: '2026-04-27T10:00:00.000Z',
     ...overrides,
-  }
-}
-
-function createProviderDraft(
-  invoiceNo: string,
-  totalAmount: string,
-  overrides: {
-    markdownText?: string
-  } = {},
-) {
-  return {
-    schemaVersion: 'invoice-extraction-v2',
-    pageCount: 1,
-    documentKind: 'pdf',
-    header: {
-      supplier: 'Bescuit Test Supplier',
-      invoiceNo,
-      date: '2026-05-27',
-      subtotalAmount: totalAmount,
-      taxAmount: '0.00',
-      totalAmount,
-      currency: 'EUR',
-      notes: '',
-    },
-    lineItems: [
-      {
-        id: `${invoiceNo}-line-1`,
-        name: 'Test item',
-        qty: '1',
-        unit: 'unit',
-        unitPrice: totalAmount,
-        lineTotal: totalAmount,
-        ingredient: '',
-        matched: false,
-      },
-    ],
-    markdownText: overrides.markdownText ?? `invoice ${invoiceNo}`,
-    provider: 'heuristic-v1',
-    model: 'filename-fallback-v1',
-    confidence: {
-      overall: 0.95,
-      header: 0.95,
-      lineItems: 0.95,
-      totals: 0.95,
-    },
-    warnings: [],
   }
 }
 

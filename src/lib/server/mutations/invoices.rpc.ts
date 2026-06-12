@@ -60,6 +60,11 @@ interface DeletableIntakeJobRow {
   r2Key: string | null
 }
 
+interface RecheckSiblingRow {
+  jobId: string
+  stage: string
+}
+
 export const uploadInvoiceIntakeDocument = createServerFn({ method: 'POST' })
   .inputValidator((data) => {
     if (!(data instanceof FormData)) {
@@ -208,7 +213,20 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     throw new Error('已完成的发票任务不能从最近任务中删除。')
   }
 
-  if (row.r2Key) {
+  const [{ referenceCount } = { referenceCount: 0 }] = await allD1<{
+    referenceCount: number
+  }>(
+    db,
+    `/* invoice:delete-source-reference-count */
+    SELECT COUNT(*) AS referenceCount
+    FROM intake_jobs
+    WHERE source_document_id = ?
+      AND id != ?`,
+    [row.sourceDocumentId, row.jobId],
+  )
+  const isLastSourceJob = Number(referenceCount) === 0
+
+  if (row.r2Key && isLastSourceJob) {
     const documentsBucket = rawDocumentsBucket
 
     if (!documentsBucket) {
@@ -253,14 +271,16 @@ export async function deleteInvoiceIntakeJobFromDatabase(
     throw new Error('发票任务删除状态已变化，不能完成删除。')
   }
 
-  await db
-    .prepare(
-      `/* invoice:delete-source-document */
-      DELETE FROM source_documents
-      WHERE id = ?`,
-    )
-    .bind(row.sourceDocumentId)
-    .run()
+  if (isLastSourceJob) {
+    await db
+      .prepare(
+        `/* invoice:delete-source-document */
+        DELETE FROM source_documents
+        WHERE id = ?`,
+      )
+      .bind(row.sourceDocumentId)
+      .run()
+  }
 
   return {
     ok: true,
@@ -393,7 +413,29 @@ export async function recheckInvoiceReviewJobInDatabase(
 
     assertInvoiceMutationChanged(extractionResult, '发票任务状态已变化，不能保存重新核对结果。')
 
-    if (extraction.additionalDrafts?.length) {
+    const additionalDrafts = extraction.additionalDrafts ?? []
+    const currentSiblingJobIds = additionalDrafts.map(
+      (additional) => `${row.jobId}_p${additional.pageNumber}`,
+    )
+    const currentSiblingJobIdSet = new Set(currentSiblingJobIds)
+    const staleNonReadySiblingJobIds = (
+      await listRecheckSiblingRows(db, {
+        originalJobId: row.jobId,
+        sourceDocumentId: row.sourceDocumentId,
+      })
+    )
+      .filter(
+        (sibling) =>
+          !currentSiblingJobIdSet.has(sibling.jobId) && sibling.stage !== 'ready',
+      )
+      .map((sibling) => sibling.jobId)
+
+    await deleteConfirmedInvoiceAccountingRowsForJobs(db, [
+      row.jobId,
+      ...currentSiblingJobIds,
+    ])
+
+    if (additionalDrafts.length) {
       await persistAdditionalInvoiceExtractionDrafts({
         db,
         originalJobId: row.jobId,
@@ -401,11 +443,12 @@ export async function recheckInvoiceReviewJobInDatabase(
         providerId: provider.id,
         providerModel: provider.model,
         createdAt: extractionStoredAt,
-        additionalDrafts: extraction.additionalDrafts,
+        additionalDrafts,
+        allowReadyOverwrite: true,
       })
     }
 
-    await deleteConfirmedInvoiceAccountingRows(db, row.jobId)
+    await retireStaleNonReadyRecheckSiblings(db, staleNonReadySiblingJobIds)
 
     const finishedAt = new Date().toISOString()
     const successResult = await db
@@ -592,6 +635,33 @@ async function persistInvoiceReviewDraft(
   }
 }
 
+async function listRecheckSiblingRows(
+  db: D1Database,
+  input: {
+    originalJobId: string
+    sourceDocumentId: string
+  },
+) {
+  return allD1<RecheckSiblingRow>(
+    db,
+    `/* invoice:recheck-list-siblings */
+    SELECT id AS jobId, stage
+    FROM intake_jobs
+    WHERE source_document_id = ?
+      AND id LIKE ?`,
+    [input.sourceDocumentId, `${input.originalJobId}_p%`],
+  )
+}
+
+async function deleteConfirmedInvoiceAccountingRowsForJobs(
+  db: D1Database,
+  jobIds: string[],
+) {
+  for (const jobId of jobIds) {
+    await deleteConfirmedInvoiceAccountingRows(db, jobId)
+  }
+}
+
 async function deleteConfirmedInvoiceAccountingRows(db: D1Database, jobId: string) {
   const invoiceId = getInvoiceId(jobId)
   const ledgerEntryId = getLedgerEntryId(invoiceId)
@@ -627,6 +697,42 @@ async function deleteConfirmedInvoiceAccountingRows(db: D1Database, jobId: strin
   for (const statement of statements) {
     await statement.run()
   }
+}
+
+async function retireStaleNonReadyRecheckSiblings(
+  db: D1Database,
+  siblingJobIds: string[],
+) {
+  if (siblingJobIds.length === 0) {
+    return
+  }
+
+  const placeholders = siblingJobIds.map(() => '?').join(', ')
+
+  await db
+    .prepare(
+      `/* invoice:recheck-retire-stale-sibling-extractions */
+      DELETE FROM extraction_results
+      WHERE intake_job_id IN (${placeholders})
+        AND EXISTS (
+          SELECT 1
+          FROM intake_jobs
+          WHERE intake_jobs.id = extraction_results.intake_job_id
+            AND intake_jobs.stage != 'ready'
+        )`,
+    )
+    .bind(...siblingJobIds)
+    .run()
+
+  await db
+    .prepare(
+      `/* invoice:recheck-retire-stale-sibling-jobs */
+      DELETE FROM intake_jobs
+      WHERE id IN (${placeholders})
+        AND stage != 'ready'`,
+    )
+    .bind(...siblingJobIds)
+    .run()
 }
 
 function buildRecheckedInvoiceJob(input: {
