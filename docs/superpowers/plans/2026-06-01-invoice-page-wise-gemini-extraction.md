@@ -1,5 +1,7 @@
 # Page-Wise Gemini Invoice Extraction Implementation Plan
 
+> Superseded for bundled multi-invoice PDFs by `docs/superpowers/plans/2026-06-11-fix-multi-invoice-pdf-extraction.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Gemini invoice extraction handle multi-page supplier PDFs more reliably by splitting PDFs into page-sized extraction work and merging the results into one review draft.

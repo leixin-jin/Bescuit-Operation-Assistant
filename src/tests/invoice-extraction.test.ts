@@ -582,6 +582,20 @@ describe('invoice extraction helpers', () => {
     expect(result.pages[0]?.draft.header.invoiceNo).toBe('2605A008462')
   })
 
+  test('regression: 2605A008462-2605A008463 is treated as two invoices', () => {
+    const pages = [
+      { pageNumber: 1, draft: makeDraft({ invoiceNo: '2605A008462', totalAmount: '769.22' }), rawResponse: '{"page":1}' },
+      { pageNumber: 2, draft: makeDraft({ invoiceNo: '2605A008463', totalAmount: '733.15' }), rawResponse: '{"page":2}' },
+    ]
+
+    const result = splitPageDraftsIntoProviderResult(pages)
+
+    expect(result.draft.header.invoiceNo).toBe('2605A008462')
+    expect(result.draft.header.totalAmount).toBe('769.22')
+    expect(result.additionalDrafts?.[0]?.draft.header.invoiceNo).toBe('2605A008463')
+    expect(result.additionalDrafts?.[0]?.draft.header.totalAmount).toBe('733.15')
+  })
+
   test('classifies page drafts with the same invoice number as one invoice', () => {
     const result = classifyPageDrafts([
       { pageNumber: 1, draft: makeDraft({ invoiceNo: 'F-100', totalAmount: '' }), rawResponse: '{}' },
